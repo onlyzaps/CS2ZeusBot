@@ -545,7 +545,17 @@ namespace ZeusBotAI
             if (agent.Blackboard.CurrentTargetFact == null) return true;
             float targetDist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             bool hasZeus = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
-            return targetDist <= (hasZeus ? 190f : 65f); // Close the entire gap if forced to use knife
+            
+            var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+            bool isHoldingKnife = activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
+
+            // Stop approach so we can swap to Zeus before we hit lethal range
+            if (hasZeus && isHoldingKnife && targetDist <= 350f)
+            {
+                return true; 
+            }
+
+            return targetDist <= (hasZeus ? 180f : 65f); // Close the gap to lethal range
         }
         public override void Execute(BotAgent agent, float dt)
         {
@@ -740,9 +750,8 @@ namespace ZeusBotAI
                 float aimDot = MathUtils.DotProduct(currentForward, exactDir);
                 float dist = (botHead - enemyChest).Length();
                 
-                // Allow them to "flick". If they aren't dead-on, they don't fire. 
-                // 0.985f is highly lethal but accounts for the heavy ADAD spam they are now doing
-                if (aimDot > 0.95f || (dist < 150f && aimDot > 0.85f)) 
+                // Require perfect centering. 0.995f is extremely accurate, preventing premature empty clicks!
+                if (aimDot > 0.994f || (dist < 120f && aimDot > 0.980f)) 
                 {
                     if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
                     {
@@ -772,44 +781,48 @@ namespace ZeusBotAI
             else if (goal is GoalKillEnemy)
             {
                 bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
-                
-                // Ensure they explicitly equip the best weapon before trying to use it
-                var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-                if (activeWeapon == null || (!activeWeapon.DesignerName.Contains("taser") && !activeWeapon.DesignerName.Contains("knife")))
+                float dist = 9999f;
+                if (agent.Blackboard.CurrentTargetFact != null)
                 {
-                    if (hasZeus)
-                    {
-                        var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
-                        if (equipAction != null) bestPlan.Add(equipAction);
-                    }
-                    else
+                    dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+                }
+
+                if (hasZeus)
+                {
+                    if (dist > 350f)
                     {
                         var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
                         if (equipKnife != null) bestPlan.Add(equipKnife);
+                        
+                        var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                        if (approach != null) bestPlan.Add(approach);
                     }
-                }
-                
-                // Because Zeus regenerates so fast, don't fallback to knife if we HAVE a zeus. Always try to approach for Zeus.
-                if (hasZeus && activeWeapon != null && activeWeapon.DesignerName.Contains("knife"))
-                {
-                     var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
-                     if (equipAction != null) bestPlan.Add(equipAction);
-                }
-
-                // Push approach phase
-                if (!startState.Values.GetValueOrDefault(StateKey.TargetInZeusRange, false) && hasZeus)
-                    bestPlan.Add(usableActions.First(a => a is ActionApproachTarget));
-                else if (!startState.Values.GetValueOrDefault(StateKey.TargetInKnifeRange, false) && !hasZeus)
-                    bestPlan.Add(usableActions.First(a => a is ActionApproachTarget));
-                
-                // Push engagement phase
-                if (hasZeus)
-                {
-                    var engageZeus = usableActions.FirstOrDefault(a => a is ActionEngageZeus);
-                    if (engageZeus != null) bestPlan.Add(engageZeus);
+                    else
+                    {
+                        var equipZeus = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
+                        if (equipZeus != null) bestPlan.Add(equipZeus);
+                        
+                        if (dist > 180f)
+                        {
+                            var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                            if (approach != null) bestPlan.Add(approach);
+                        }
+                        
+                        var engageZeus = usableActions.FirstOrDefault(a => a is ActionEngageZeus);
+                        if (engageZeus != null) bestPlan.Add(engageZeus);
+                    }
                 }
                 else
                 {
+                    var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
+                    if (equipKnife != null) bestPlan.Add(equipKnife);
+                    
+                    if (dist > 65f)
+                    {
+                        var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                        if (approach != null) bestPlan.Add(approach);
+                    }
+                    
                     var engageKnife = usableActions.FirstOrDefault(a => a is ActionEngageKnife);
                     if (engageKnife != null) bestPlan.Add(engageKnife);
                 }
