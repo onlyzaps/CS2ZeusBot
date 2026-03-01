@@ -16,7 +16,7 @@ namespace ZeusBotAI
         public float StrafeDirection { get; set; } = 1.0f; 
         public float JumpCooldown { get; set; } = 0f;
         public float DuckReleaseTime { get; set; } = 0f;
-        public float CurrentAimSpeed { get; set; } = 0.15f; 
+        public float CurrentAimSpeed { get; set; } = 0.16f; 
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
         public Vector LastPosition { get; set; } = new Vector(0, 0, 0);
         public float LastStuckCheckTime { get; set; } = 0f;
@@ -31,7 +31,7 @@ namespace ZeusBotAI
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Smart Inventory & High Aggression)";
+        public override string ModuleName => "Zeus Bot AI (Hybrid Weapon Forcing & High Aggression)";
         public override string ModuleVersion => "17.0.5";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
@@ -43,7 +43,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v17.0.4 Smart Inventory & High Aggression loaded.");
+            Console.WriteLine("[Zeus Bot AI] v17.0.5 Hybrid Weapon Forcing & High Aggression loaded.");
         }
 
         private void ProcessBotBrains()
@@ -70,6 +70,7 @@ namespace ZeusBotAI
                 }
 
                 var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
+                float distToTarget = float.MaxValue;
                 
                 if (target == null) 
                 {
@@ -81,14 +82,19 @@ namespace ZeusBotAI
                     {
                         memory.CurrentTarget = target;
                         memory.TargetAcquiredTime = currentTime;
-                        memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.16f; // Slightly faster aim
+                        memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.16f; 
+                    }
+                    
+                    if (botPawn.AbsOrigin != null && target.PlayerPawn.Value?.AbsOrigin != null)
+                    {
+                        distToTarget = (botPawn.AbsOrigin - target.PlayerPawn.Value.AbsOrigin).Length();
                     }
                 }
 
                 if (currentTime > memory.NextStrafeSwitch)
                 {
                     memory.StrafeDirection = random.NextDouble() > 0.5 ? 1.0f : -1.0f;
-                    memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.0f + 0.5f); // Faster strafe switches
+                    memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.0f + 0.5f); 
                 }
 
                 Vector totalRepulsion = new Vector(0, 0, 0);
@@ -104,7 +110,7 @@ namespace ZeusBotAI
 
                         float distToAlly = (botPos - otherPawn.AbsOrigin).Length();
                         
-                        if (distToAlly < 250.0f) // Reduced repulsion radius to let them swarm closer together
+                        if (distToAlly < 250.0f) 
                         {
                             Vector dirAway = GetNormalizedVector(otherPawn.AbsOrigin, botPos);
                             float weight = (float)Math.Pow(1.0f - (distToAlly / 250.0f), 2.0) * 1.2f; 
@@ -115,8 +121,8 @@ namespace ZeusBotAI
                 }
                 memory.RepulsionForce = totalRepulsion;
 
-                // Let the bot AI naturally pick weapons by controlling what exists in their inventory
-                ManageBotInventory(bot, botPawn);
+                // Handle the intelligent stripping and forcing
+                ManageWeaponsAndForcing(bot, botPawn, target != null, distToTarget);
             }
         }
 
@@ -194,10 +200,10 @@ namespace ZeusBotAI
                     
                     if (currentTime > memory.JumpCooldown && distance < 1200.0f && !isClearingLadder)
                     {
-                        if (random.NextDouble() < 0.06) // Increased jump frequency
+                        if (random.NextDouble() < 0.06) 
                         {
                             botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
-                            memory.JumpCooldown = currentTime + 0.8f + (random.NextSingle() * 1.0f); // Lower cooldown
+                            memory.JumpCooldown = currentTime + 0.8f + (random.NextSingle() * 1.0f); 
                             memory.DuckReleaseTime = currentTime + 0.4f;
                         }
                     }
@@ -260,7 +266,7 @@ namespace ZeusBotAI
                     }
 
                     bool isEscaping = currentTime < memory.EscapeEndTime;
-                    float driftFactor = (float)Math.Sin(currentTime * 4.5f + bot.Index) * 0.3f; // Tighter, faster drift
+                    float driftFactor = (float)Math.Sin(currentTime * 4.5f + bot.Index) * 0.3f; 
 
                     // --- HIGH AGGRESSION MASTER BLENDER ---
                     if (isClearingLadder)
@@ -273,27 +279,23 @@ namespace ZeusBotAI
                     }
                     else if (isPincering && distance > 150.0f)
                     {
-                        // Flank aggressively
                         finalMoveDir = new Vector((pursuitDir.X * 0.8f) + (pincerWrapDir.X * 1.0f), 
                                                   (pursuitDir.Y * 0.8f) + (pincerWrapDir.Y * 1.0f), 0);
                     }
                     else if (distance > 180.0f) 
                     {
-                        // Hard push to close gap
                         finalMoveDir = new Vector((pursuitDir.X * 1.2f) + (strafeDir.X * driftFactor), (pursuitDir.Y * 1.2f) + (strafeDir.Y * driftFactor), 0);
                     }
                     else if (distance > 90.0f) 
                     {
-                        // Danger zone: pushing to kill range
                         finalMoveDir = new Vector((pursuitDir.X * 1.0f) + (strafeDir.X * 0.4f), (pursuitDir.Y * 1.0f) + (strafeDir.Y * 0.4f), 0);
                     }
                     else 
                     {
-                        // Under 90 units, tightly orbit/strafe to avoid missing
                         finalMoveDir = new Vector((pursuitDir.X * 0.2f) + (strafeDir.X * 1.2f), (pursuitDir.Y * 0.2f) + (strafeDir.Y * 1.2f), 0);
                     }
 
-                    if (isAirborne && !isClearingLadder) finalMoveDir = new Vector(finalMoveDir.X * 1.3f, finalMoveDir.Y * 1.3f, 0); // More air control
+                    if (isAirborne && !isClearingLadder) finalMoveDir = new Vector(finalMoveDir.X * 1.3f, finalMoveDir.Y * 1.3f, 0); 
 
                     if (!isClearingLadder)
                     {
@@ -336,8 +338,6 @@ namespace ZeusBotAI
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
                     
-                    // We check if the bot actually has the Taser out. 
-                    // Since we aren't forcing the weapon, we respect the bot's natural equip state.
                     var activeWeapon = botPawn.WeaponServices?.ActiveWeapon.Value;
                     bool holdingTaser = activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("taser");
 
@@ -385,15 +385,18 @@ namespace ZeusBotAI
             return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
-        // --- SMART INVENTORY MANAGEMENT ---
-        private void ManageBotInventory(CCSPlayerController bot, CCSPlayerPawn pawn)
+        // --- HYBRID WEAPON FORCING & INVENTORY MANAGEMENT ---
+        private void ManageWeaponsAndForcing(CCSPlayerController bot, CCSPlayerPawn pawn, bool hasTarget, float distanceToTarget)
         {
             var weaponServices = pawn.WeaponServices;
             if (weaponServices?.MyWeapons == null) return;
 
             bool hasZeus = false;
+            uint taserHandle = 0;
+            uint knifeHandle = 0;
             List<CBasePlayerWeapon> weaponsToRemove = new List<CBasePlayerWeapon>();
 
+            // 1. Identify and clean up inventory
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -403,21 +406,26 @@ namespace ZeusBotAI
 
                 if (name.Contains("taser"))
                 {
-                    hasZeus = true;
-                    // Deep Dive Fix: If the Taser is empty, the bot AI blacklists it.
-                    // We bypass the 30s recharge and bot AI caching by giving a fresh one.
-                    if (weapon.Clip1 <= 0)
+                    if (weapon.Clip1 <= 0) 
                     {
+                        // Trash empty tasers so the brain doesn't blacklist them
                         weaponsToRemove.Add(weapon);
-                        hasZeus = false; // Flag to instantly replace it
+                    }
+                    else
+                    {
+                        hasZeus = true;
+                        taserHandle = weaponHandle.Raw;
                     }
                 }
-                else if (!name.Contains("knife") && !name.Contains("bayonet") && 
-                         !name.Contains("grenade") && !name.Contains("flashbang") && 
+                else if (name.Contains("knife") || name.Contains("bayonet"))
+                {
+                    knifeHandle = weaponHandle.Raw;
+                }
+                else if (!name.Contains("grenade") && !name.Contains("flashbang") && 
                          !name.Contains("molotov") && !name.Contains("incgrenade") && 
                          !name.Contains("decoy") && !name.Contains("c4"))
                 {
-                    // Strip all firearms so the bot AI naturally falls back to the Taser/Knife hierarchy.
+                    // Strip all firearms
                     weaponsToRemove.Add(weapon);
                 }
             }
@@ -427,9 +435,45 @@ namespace ZeusBotAI
                 weapon.Remove();
             }
 
+            // 2. Grant fresh Zeus if needed
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
+                return; // Wait for the next tick for the handle to generate before forcing it
+            }
+
+            // 3. Force equip based on distance
+            if (hasTarget && distanceToTarget < 1500.0f)
+            {
+                var activeWeapon = weaponServices.ActiveWeapon.Value;
+                if (activeWeapon != null && activeWeapon.DesignerName != null)
+                {
+                    bool isUtility = activeWeapon.DesignerName.Contains("grenade") || 
+                                     activeWeapon.DesignerName.Contains("flashbang") || 
+                                     activeWeapon.DesignerName.Contains("molotov") || 
+                                     activeWeapon.DesignerName.Contains("incgrenade") || 
+                                     activeWeapon.DesignerName.Contains("decoy");
+
+                    if (!isUtility)
+                    {
+                        if (distanceToTarget > 400.0f && knifeHandle != 0)
+                        {
+                            if (!activeWeapon.DesignerName.Contains("knife") && !activeWeapon.DesignerName.Contains("bayonet"))
+                            {
+                                weaponServices.ActiveWeapon.Raw = knifeHandle;
+                                Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pWeaponServices");
+                            }
+                        }
+                        else if (distanceToTarget <= 400.0f && taserHandle != 0)
+                        {
+                            if (!activeWeapon.DesignerName.Contains("taser"))
+                            {
+                                weaponServices.ActiveWeapon.Raw = taserHandle;
+                                Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pWeaponServices");
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -469,7 +513,7 @@ namespace ZeusBotAI
                 if (botDot > 0.7f) threatScore += 400.0f; 
                 else if (botDot < 0.0f) threatScore -= 300.0f; 
 
-                if (distance <= 300.0f) threatScore += 4000.0f; // Massive priority to closest targets
+                if (distance <= 300.0f) threatScore += 4000.0f; 
 
                 if (threatScore > highestThreatScore)
                 {
