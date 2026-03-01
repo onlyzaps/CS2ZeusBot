@@ -31,32 +31,39 @@ namespace ZeusBotAI
             var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
             
             if (!bots.Any()) return;
-
+        
             var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && !p.IsBot).ToList();
-
+        
             foreach (var bot in bots)
             {
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn == null) continue;
-
-                EnsureBotHasAndHoldsZeus(bot, botPawn);
-
-                // If this bot is already in the middle of a reaction delay, leave them alone
+        
                 if (reactingBots.Contains(bot.Index)) continue;
-
+        
                 var target = GetNearestEnemyInFOV(bot, botPawn, aliveEnemies);
                 if (target == null) continue;
-
+        
                 var targetPawn = target.PlayerPawn.Value;
                 if (targetPawn == null) continue;
-
+        
                 float distance = (botPawn.AbsOrigin! - targetPawn.AbsOrigin!).Length();
-
-                if (distance <= 180.0f)
+        
+                // CONCEALED CARRY LOGIC:
+                // Only force the bot to pull out the Zeus if the player is getting close.
+                // 350 units gives the bot roughly 1 second to play the "deploy" animation before firing.
+                if (distance <= 350.0f)
                 {
-                    // Trigger the human reaction sequence
-                    StartHumanReaction(bot, botPawn, targetPawn);
+                    EnsureBotHasAndHoldsZeus(bot, botPawn);
+        
+                    // If they close the gap to 180 units, pull the trigger
+                    if (distance <= 180.0f)
+                    {
+                        StartHumanReaction(bot, botPawn, targetPawn);
+                    }
                 }
+                // If the player is further than 350 units, we leave the bot alone.
+                // This stops the AI from infinitely dropping the weapon.
             }
         }
 
