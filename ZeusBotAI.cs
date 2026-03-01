@@ -177,6 +177,9 @@ namespace ZeusBotAI
             
             Blackboard.NearbyAllies.Clear();
 
+            // Track if we found ANY enemies to keep moving towards
+            bool foundEnemy = false;
+
             foreach (var player in allPlayers)
             {
                 if (player == Controller || !player.PawnIsAlive) continue;
@@ -187,14 +190,17 @@ namespace ZeusBotAI
                 float dist = (myPos - otherPos).Length();
                 Vector dirToOther = MathUtils.NormalizeVector(otherPos - myPos);
                 
-                if (player.TeamNum == Controller.TeamNum || player.IsBot)
+                if (player.TeamNum == Controller.TeamNum)
                 {
                     if (dist < 300f) // Keep track of allies to avoid crowding
                     {
                         Blackboard.NearbyAllies.Add(otherPos);
                     }
-                    continue;
+                    continue; // Skip tracking allies as targets
                 }
+
+                // If not our team, it's an enemy (so T bots track CT players, CT bots track T players)
+                foundEnemy = true;
 
                 // Global Knowledge Tracker - keeps them moving across map
                 if (!Memory.Facts.ContainsKey(player.Index))
@@ -229,6 +235,13 @@ namespace ZeusBotAI
                     // Passthrough mode - just moving towards general area
                     fact.ThreatLevel = 100f;
                 }
+            }
+
+            // If we have no enemies on the map (e.g., all dead or not spawned), clear our targets so we don't act weird
+            if (!foundEnemy)
+            {
+                var keys = Memory.Facts.Keys.ToList();
+                foreach (var key in keys) Memory.Facts.Remove(key);
             }
         }
 
