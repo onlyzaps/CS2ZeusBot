@@ -76,20 +76,32 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # Fetch all release tags and delete them along with their git tags
+        # 1. Fetch all release entries and delete them
         RELEASES=$(gh release list --limit 1000 | awk '{print $1}')
         for release in $RELEASES; do
           if [ -n "$release" ]; then
-            echo "Deleting release and tag: $release"
-            gh release delete "$release" -y --cleanup-tag || true
+            echo "Deleting GitHub release: $release"
+            gh release delete "$release" -y || true
           fi
         done
         
-        # Backup cleanup: Ensure the v1.0 tag is completely removed from origin 
-        git push --delete origin v1.0 || true
+        # 2. Find ALL tags on the remote and delete them
+        REMOTE_TAGS=$(git ls-remote --tags --refs origin | awk -F/ '{print $3}')
+        for tag in $REMOTE_TAGS; do
+          if [ -n "$tag" ]; then
+            echo "Deleting remote tag: $tag"
+            git push --delete origin "$tag" || true
+          fi
+        done
         
-        # FIX: Delete the tag locally so the runner's git cache doesn't confuse the gh cli
-        git tag -d v1.0 || true
+        # 3. Find ALL local tags in the runner's workspace and delete them
+        LOCAL_TAGS=$(git tag)
+        for tag in $LOCAL_TAGS; do
+          if [ -n "$tag" ]; then
+            echo "Deleting local tag: $tag"
+            git tag -d "$tag" || true
+          fi
+        done
 
     - name: Create GitHub Release v1.0
       env:
