@@ -15,16 +15,15 @@ namespace ZeusBotAI
         public float NextStrafeSwitch { get; set; } = 0f;
         public float StrafeDirection { get; set; } = 1.0f; 
         public float JumpCooldown { get; set; } = 0f;
+        public float DuckReleaseTime { get; set; } = 0f;
         public float CurrentAimSpeed { get; set; } = 0.15f; 
-        
-        // Multi-target awareness vector calculated in the brain loop
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
     }
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Spatial Bob & Weave)";
-        public override string ModuleVersion => "5.0.2";
+        public override string ModuleName => "Zeus Bot AI (Chaotic Evasion & Air-Strafing)";
+        public override string ModuleVersion => "6.0.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -34,7 +33,7 @@ namespace ZeusBotAI
         {
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v5.0 Spatial Awareness & Oscillation loaded.");
+            Console.WriteLine("[Zeus Bot AI] v6.0 Chaotic Evasion & Air-Strafing loaded.");
         }
 
         private void ProcessBotBrains()
@@ -71,16 +70,23 @@ namespace ZeusBotAI
                 {
                     memory.CurrentTarget = target;
                     memory.TargetAcquiredTime = currentTime;
-                    memory.CurrentAimSpeed = (random.NextSingle() * 0.15f) + 0.10f; 
+                    memory.CurrentAimSpeed = (random.NextSingle() * 0.18f) + 0.12f; 
                 }
 
+                // Hyper-aggressive strafe flipping
                 if (currentTime > memory.NextStrafeSwitch)
                 {
                     memory.StrafeDirection = random.NextDouble() > 0.5 ? 1.0f : -1.0f;
-                    memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 0.5f + 0.2f);
+                    // Much faster switching in close combat
+                    float switchDelay = (botPawn.AbsOrigin != null && target.PlayerPawn.Value?.AbsOrigin != null && 
+                                        (botPawn.AbsOrigin - target.PlayerPawn.Value.AbsOrigin).Length() < 250.0f) 
+                                        ? (random.NextSingle() * 0.3f + 0.1f) 
+                                        : (random.NextSingle() * 0.5f + 0.2f);
+                    
+                    memory.NextStrafeSwitch = currentTime + switchDelay;
                 }
 
-                // --- MULTI-TARGET REPULSION CALCULATION ---
+                // --- MULTI-TARGET REPULSION ---
                 Vector totalRepulsion = new Vector(0, 0, 0);
                 var botPos = botPawn.AbsOrigin;
 
@@ -88,7 +94,7 @@ namespace ZeusBotAI
                 {
                     foreach (var enemy in aliveEnemies)
                     {
-                        if (enemy == target) continue; // Don't repel from the guy we are trying to kill!
+                        if (enemy == target) continue; 
                         
                         var enemyPawn = enemy.PlayerPawn.Value;
                         if (enemyPawn == null || enemyPawn.AbsOrigin == null) continue;
@@ -99,9 +105,7 @@ namespace ZeusBotAI
                         if (distToSecondary < maxRepelDistance)
                         {
                             Vector dirAway = GetNormalizedVector(enemyPawn.AbsOrigin, botPos);
-                            // Weight increases exponentially the closer the secondary threat gets
                             float weight = (float)Math.Pow(1.0f - (distToSecondary / maxRepelDistance), 2.0) * 1.5f; 
-                            
                             totalRepulsion.X += dirAway.X * weight;
                             totalRepulsion.Y += dirAway.Y * weight;
                         }
@@ -145,39 +149,57 @@ namespace ZeusBotAI
                     Vector finalMoveDir = new Vector(0, 0, 0);
                     float moveSpeed = 250.0f; 
 
-                    // --- THE BOB & WEAVE (Kinematic Oscillation) ---
-                    // Generates a rapidly fluctuating value between -0.3 and 0.3 based on server time
-                    float weaveOffset = (float)Math.Sin(currentTime * 12.0) * 0.35f;
+                    // --- CHAOTIC OSCILLATION (Lissajous curves) ---
+                    // By multiplying sin and cos at different frequencies, the movement becomes highly erratic
+                    float complexWeave = (float)(Math.Sin(currentTime * 14.0) * Math.Cos(currentTime * 7.0)) * 0.5f;
+
+                    // Detect if airborne (Velocity Z is significantly non-zero)
+                    bool isAirborne = Math.Abs(currentVel.Z) > 5.0f;
 
                     if (distance > 400.0f)
                     {
                         finalMoveDir = new Vector((pursuitDir.X * 0.9f) + (strafeDir.X * 0.1f), (pursuitDir.Y * 0.9f) + (strafeDir.Y * 0.1f), 0);
                     }
-                    else if (distance > 170.0f)
+                    else if (distance > 220.0f)
                     {
                         finalMoveDir = new Vector((pursuitDir.X * 0.6f) + (strafeDir.X * 0.6f), (pursuitDir.Y * 0.6f) + (strafeDir.Y * 0.6f), 0);
                     }
                     else
                     {
-                        // KILL ZONE: Perfect orbit, heavily disrupted by the weave offset (W/S stutter stepping)
-                        finalMoveDir = new Vector(
-                            strafeDir.X + (pursuitDir.X * weaveOffset), 
-                            strafeDir.Y + (pursuitDir.Y * weaveOffset), 
-                            0
-                        );
+                        // KILL ZONE: Evasive Air-Strafing & Stuttering
+                        if (isAirborne)
+                        {
+                            // Mid-air: Increase strafe width aggressively to "hook" around the player
+                            finalMoveDir = new Vector(
+                                (strafeDir.X * 1.2f) + (pursuitDir.X * complexWeave * 0.5f), 
+                                (strafeDir.Y * 1.2f) + (pursuitDir.Y * complexWeave * 0.5f), 
+                                0
+                            );
+                        }
+                        else
+                        {
+                            // Grounded: Heavy stutter-stepping and feinting
+                            finalMoveDir = new Vector(
+                                strafeDir.X + (pursuitDir.X * complexWeave), 
+                                strafeDir.Y + (pursuitDir.Y * complexWeave), 
+                                0
+                            );
+                        }
                     }
 
-                    // Inject the multi-target Repulsion Force to slide away from third parties
                     finalMoveDir.X += memory.RepulsionForce.X;
                     finalMoveDir.Y += memory.RepulsionForce.Y;
-
                     finalMoveDir = NormalizeVector(finalMoveDir);
+                    
+                    // Maintain vertical velocity for gravity and jumping
                     Vector injectedVelocity = new Vector(finalMoveDir.X * moveSpeed, finalMoveDir.Y * moveSpeed, currentVel.Z);
 
                     // --- FLUID AIM ---
                     float deltaX = targetPos.X - botPos.X;
                     float deltaY = targetPos.Y - botPos.Y;
-                    float deltaZ = (targetPos.Z + 45.0f) - (botPos.Z + 45.0f); 
+                    // Aim slightly lower if they are airborne so the Zeus connects with the torso
+                    float zOffset = isAirborne ? 30.0f : 45.0f; 
+                    float deltaZ = (targetPos.Z + zOffset) - (botPos.Z + 45.0f); 
 
                     float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
                     float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
@@ -191,23 +213,43 @@ namespace ZeusBotAI
 
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- TRIGGER DISCIPLINE & MICRO-DUCKING ---
+                    // --- EVASIVE HOPPING & TRIGGER DISCIPLINE ---
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     botPawn.MovementServices.Buttons.ButtonStates[0] = 0; 
 
-                    // Randomly tap duck in the kill zone to break headshot tracking
-                    if (distance <= 200.0f && random.NextDouble() < 0.15)
+                    // KILL ZONE HOPPING LOGIC
+                    if (distance <= 250.0f)
                     {
-                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
-                    }
+                        // 1. Spastic Jumping
+                        if (currentTime > memory.JumpCooldown && !isAirborne && random.NextDouble() < 0.25) // 25% chance to jump per tick when off cooldown
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
+                            // Randomize cooldown so they don't perfectly rhythm-bounce
+                            memory.JumpCooldown = currentTime + (random.NextSingle() * 0.4f + 0.3f); 
+                            
+                            // 2. Crouch-Jump execution: Tuck legs mid-air 100ms after jumping
+                            memory.DuckReleaseTime = currentTime + (random.NextSingle() * 0.5f + 0.3f);
+                            
+                            // Force a strafe direction flip mid-jump to break tracking
+                            memory.StrafeDirection *= -1.0f;
+                            memory.NextStrafeSwitch = currentTime + 0.5f;
+                        }
 
-                    if (distance > 200.0f && currentTime > memory.JumpCooldown && random.NextDouble() < 0.05)
+                        // 3. Maintain mid-air tuck
+                        if (currentTime < memory.DuckReleaseTime || (isAirborne && random.NextDouble() < 0.8))
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
+                        }
+                    }
+                    else if (distance > 300.0f && currentTime > memory.JumpCooldown && random.NextDouble() < 0.05)
                     {
+                        // Occasional distance gap-closing hops
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
                         memory.JumpCooldown = currentTime + 0.8f;
                     }
 
-                    if (distance <= 170.0f && yawDiff < 4.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
+                    // PULL THE TRIGGER
+                    if (distance <= 170.0f && yawDiff < 5.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
                     }
