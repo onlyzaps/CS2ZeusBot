@@ -31,7 +31,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI";
-        public override string ModuleVersion => "18.2.5";
+        public override string ModuleVersion => "18.2.6";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
