@@ -501,11 +501,24 @@ namespace ZeusBotAI
         public override int GetPriority(BotAgent agent)
         {
             var target = agent.Blackboard.CurrentTargetFact;
-            if (target != null && !target.IsVisible && target.LastHeardTime > Server.CurrentTime - 3.0f)
+            if (target != null && !target.IsVisible && target.LastHeardTime > Server.CurrentTime - 2.0f)
             {
                 float dist = (agent.Pawn.AbsOrigin! - target.LastKnownPosition).Length();
-                if (dist < 1000f && dist >= 150f) 
-                    return 70; // High priority, but KillEnemy will override if target becomes visible
+                // ONLY ambush if they are close enough that we can quickly intercept, but not so close they see us.
+                // 1000f was too far, causing bots to freeze constantly across the map.
+                if (dist < 400f && dist >= 200f) 
+                {
+                    // If we have an objective nearby, maybe prioritize it instead of freezing
+                    if (agent.TargetDestination != null)
+                    {
+                        float distToObj = (agent.Pawn.AbsOrigin! - agent.TargetDestination).Length();
+                        if (distToObj > 800f) return 70; // Too far from objective, try ambush
+                    }
+                    else
+                    {
+                        return 70; 
+                    }
+                }
             }
             return 0;
         }
@@ -529,14 +542,19 @@ namespace ZeusBotAI
         
         private Vector ambushSpot = new Vector(0,0,0);
         private bool hasAmbushSpot = false;
+        private float ambushStartTime = 0f;
 
         public override void OnEnter(BotAgent agent)
         {
             hasAmbushSpot = false;
+            ambushStartTime = Server.CurrentTime;
         }
 
         public override bool IsDone(BotAgent agent)
         {
+            // Give up on ambush if it takes too long to execute (stuck or enemy ran away)
+            if (Server.CurrentTime - ambushStartTime > 5.0f) return true;
+
             var target = agent.Blackboard.CurrentTargetFact;
             if (target == null || target.IsVisible) return true; 
             float dist = (agent.Pawn.AbsOrigin! - target.LastKnownPosition).Length();
@@ -797,7 +815,7 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.6";
+        public override string ModuleVersion => "2.0.5";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
