@@ -24,7 +24,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Reactionary Dodging & Aim Fix)";
-        public override string ModuleVersion => "7.1.0";
+        public override string ModuleVersion => "7.1.1";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
