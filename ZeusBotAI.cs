@@ -8,220 +8,442 @@ using System.Linq;
 
 namespace ZeusBotAI
 {
+    public class CombatState
+    {
+        public CCSPlayerController? CurrentTarget { get; set; }
+        public float TargetAcquiredTime { get; set; } = 0f;
+        public float NextStrafeSwitch { get; set; } = 0f;
+        public float StrafeDirection { get; set; } = 1.0f; 
+        public float JumpCooldown { get; set; } = 0f;
+        public float CurrentAimSpeed { get; set; } = 0.15f; 
+        public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
+        public float FearEndTime { get; set; } = 0f;
+        public Vector LastPosition { get; set; } = new Vector(0, 0, 0);
+        public float LastStuckCheckTime { get; set; } = 0f;
+        public Vector EscapeVector { get; set; } = new Vector(0, 0, 0);
+        public float EscapeEndTime { get; set; } = 0f;
+        public float NextFireTime { get; set; } = 0f; 
+    }
+
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI";
-        public override string ModuleVersion => "17.0.10";
-        private CounterStrikeSharp.API.Modules.Timers.Timer? botAiTimer;
+        public override string ModuleName => "Zeus Bot AI (Grand Unified Strategy)";
+        public override string ModuleVersion => "15.0.0";
         
-        // Tracks which bots are currently "reacting" so we don't spam timers on them
-        private readonly HashSet<uint> reactingBots = new HashSet<uint>();
+        private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
+        private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
         private readonly Random random = new Random();
 
         public override void Load(bool hotReload)
         {
-            // Run our main scanner 10 times a second
-            botAiTimer = AddTimer(0.1f, RunBotScanner, TimerFlags.REPEAT);
-            Console.WriteLine("[Zeus Bot AI] Humanized behavior tree loaded.");
+            Server.ExecuteCommand("bot_dont_shoot 0"); 
+            brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
+            RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
+            Console.WriteLine("[Zeus Bot AI] v15.0 Grand Unified Strategy loaded.");
         }
 
-        private void RunBotScanner()
+        private void ProcessBotBrains()
         {
             var players = Utilities.GetPlayers();
             var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
-            
+            var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && p.PlayerPawn.Value != null && p.PlayerPawn.Value.Health > 0 && !p.IsBot).ToList();
+
             if (!bots.Any()) return;
-        
-            var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && !p.IsBot).ToList();
-        
+
+            float currentTime = Server.CurrentTime;
+
             foreach (var bot in bots)
             {
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn == null) continue;
-        
-                if (reactingBots.Contains(bot.Index)) continue;
-        
-                var target = GetNearestEnemyInFOV(bot, botPawn, aliveEnemies);
-                if (target == null) continue;
-        
-                var targetPawn = target.PlayerPawn.Value;
-                if (targetPawn == null) continue;
-        
-                float distance = (botPawn.AbsOrigin! - targetPawn.AbsOrigin!).Length();
-        
-                // CONCEALED CARRY LOGIC:
-                // Only force the bot to pull out the Zeus if the player is getting close.
-                // 350 units gives the bot roughly 1 second to play the "deploy" animation before firing.
-                if (distance <= 350.0f)
+
+                if (!botMemory.TryGetValue(bot.Index, out var memory))
                 {
-                    EnsureBotHasAndHoldsZeus(bot, botPawn);
-        
-                    // If they close the gap to 180 units, pull the trigger
-                    if (distance <= 180.0f)
+                    memory = new CombatState();
+                    if (botPawn.AbsOrigin != null)
+                        memory.LastPosition = new Vector(botPawn.AbsOrigin.X, botPawn.AbsOrigin.Y, botPawn.AbsOrigin.Z);
+                    botMemory[bot.Index] = memory;
+                }
+
+                var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
+                
+                if (target == null) 
+                {
+                    memory.CurrentTarget = null;
+                }
+                else if (memory.CurrentTarget != target)
+                {
+                    memory.CurrentTarget = target;
+                    memory.TargetAcquiredTime = currentTime;
+                    memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.14f; 
+                }
+
+                if (currentTime > memory.NextStrafeSwitch)
+                {
+                    memory.StrafeDirection = random.NextDouble() > 0.5 ? 1.0f : -1.0f;
+                    memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.5f + 1.0f);
+                }
+
+                // --- ANTI-CLUMPING (Repulsion Force) ---
+                Vector totalRepulsion = new Vector(0, 0, 0);
+                var botPos = botPawn.AbsOrigin;
+
+                if (botPos != null)
+                {
+                    foreach (var otherBot in bots)
                     {
-                        StartHumanReaction(bot, botPawn, targetPawn);
+                        if (otherBot == bot) continue; 
+                        var otherPawn = otherBot.PlayerPawn.Value;
+                        if (otherPawn == null || otherPawn.AbsOrigin == null) continue;
+
+                        float distToAlly = (botPos - otherPawn.AbsOrigin).Length();
+                        
+                        if (distToAlly < 350.0f)
+                        {
+                            Vector dirAway = GetNormalizedVector(otherPawn.AbsOrigin, botPos);
+                            float weight = (float)Math.Pow(1.0f - (distToAlly / 350.0f), 2.0) * 1.5f; 
+                            totalRepulsion.X += dirAway.X * weight;
+                            totalRepulsion.Y += dirAway.Y * weight;
+                        }
                     }
                 }
-                // If the player is further than 350 units, we leave the bot alone.
-                // This stops the AI from infinitely dropping the weapon.
+                memory.RepulsionForce = totalRepulsion;
+
+                EnsureBotHasAndHoldsZeus(bot, botPawn);
             }
+        }
+
+        private void InjectKinematicsAndAim()
+        {
+            float currentTime = Server.CurrentTime;
+            var players = Utilities.GetPlayers();
+            var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
+
+            foreach (var kvp in botMemory)
+            {
+                var memory = kvp.Value;
+                var bot = Utilities.GetPlayerFromIndex((int)kvp.Key);
+                
+                if (bot == null || !bot.IsValid || !bot.PawnIsAlive) continue;
+                
+                var botPawn = bot.PlayerPawn.Value;
+                if (botPawn?.MovementServices == null || botPawn.AbsVelocity == null) continue;
+
+                if (memory.CurrentTarget != null && memory.CurrentTarget.IsValid && memory.CurrentTarget.PawnIsAlive)
+                {
+                    var targetPawn = memory.CurrentTarget.PlayerPawn.Value;
+                    if (targetPawn == null || targetPawn.Health <= 0) 
+                    {
+                        memory.CurrentTarget = null;
+                        continue;
+                    }
+
+                    var botPos = botPawn.AbsOrigin;
+                    var targetPos = targetPawn.AbsOrigin;
+                    var botAngles = botPawn.EyeAngles;
+                    var targetAngles = targetPawn.EyeAngles; 
+
+                    if (botPos == null || targetPos == null || botAngles == null || targetAngles == null) continue;
+
+                    float distance = (botPos - targetPos).Length();
+                    Vector currentVel = new Vector(botPawn.AbsVelocity.X, botPawn.AbsVelocity.Y, botPawn.AbsVelocity.Z);
+                    Vector pursuitDir = GetNormalizedVector(botPos, targetPos);
+                    Vector strafeDir = new Vector(-pursuitDir.Y * memory.StrafeDirection, pursuitDir.X * memory.StrafeDirection, 0);
+                    Vector finalMoveDir = new Vector(0, 0, 0);
+                    float moveSpeed = 260.0f; 
+
+                    bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
+                    
+                    botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
+
+                    // --- AGGRESSION JUMPING ---
+                    if (!isAirborne && currentTime > memory.JumpCooldown && distance < 800.0f)
+                    {
+                        if (random.NextDouble() < 0.04)
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
+                            memory.JumpCooldown = currentTime + 1.2f + (random.NextSingle() * 1.5f);
+                        }
+                    }
+
+                    // --- WALL-SLIDE EVASION ---
+                    if (currentTime > memory.LastStuckCheckTime + 0.4f)
+                    {
+                        float distMoved = (botPos - memory.LastPosition).Length();
+                        if (distMoved < 25.0f && !isAirborne && distance > 100.0f)
+                        {
+                            float slideDir = random.NextDouble() > 0.5 ? 1.0f : -1.0f;
+                            memory.EscapeVector = new Vector(-pursuitDir.Y * slideDir, pursuitDir.X * slideDir, 0);
+                            memory.EscapeEndTime = currentTime + 0.8f; 
+                        }
+                        memory.LastPosition = new Vector(botPos.X, botPos.Y, botPos.Z);
+                        memory.LastStuckCheckTime = currentTime;
+                    }
+
+                    // --- PINCER FLANKING LOGIC (Restored) ---
+                    Vector pincerWrapDir = new Vector(0, 0, 0);
+                    bool isPincering = false;
+                    int pincerPartners = 0;
+
+                    foreach (var ally in bots)
+                    {
+                        if (ally == bot) continue;
+                        var allyPawn = ally.PlayerPawn.Value;
+                        if (allyPawn == null || allyPawn.AbsOrigin == null) continue;
+
+                        if (botMemory.TryGetValue(ally.Index, out var allyMem) && allyMem.CurrentTarget == memory.CurrentTarget)
+                        {
+                            float allyDist = (allyPawn.AbsOrigin - targetPos).Length();
+                            
+                            if (allyDist < distance + 300.0f) 
+                            {
+                                Vector allyToTarget = GetNormalizedVector(allyPawn.AbsOrigin, targetPos);
+                                Vector perpAngle = new Vector(-allyToTarget.Y, allyToTarget.X, 0);
+                                Vector botToAlly = GetNormalizedVector(botPos, allyPawn.AbsOrigin);
+                                
+                                float sideCheck = DotProduct(perpAngle, botToAlly);
+                                
+                                if (sideCheck > 0) pincerWrapDir = new Vector(pincerWrapDir.X - perpAngle.X, pincerWrapDir.Y - perpAngle.Y, 0);
+                                else pincerWrapDir = new Vector(pincerWrapDir.X + perpAngle.X, pincerWrapDir.Y + perpAngle.Y, 0);
+                                
+                                isPincering = true;
+                                pincerPartners++;
+
+                                if (pincerPartners >= 1) break; 
+                            }
+                        }
+                    }
+                    if (isPincering) pincerWrapDir = NormalizeVector(pincerWrapDir);
+
+                    // --- THREAT AWARENESS (Fear) ---
+                    Vector targetForward = GetForwardVector(targetAngles);
+                    Vector dirToBot = GetNormalizedVector(targetPos, botPos);
+                    float playerAimDot = DotProduct(targetForward, dirToBot);
+
+                    if (playerAimDot > 0.95f && distance < 1000.0f && currentTime > memory.FearEndTime)
+                    {
+                        memory.FearEndTime = currentTime + 0.5f; 
+                        memory.StrafeDirection = (random.NextDouble() > 0.5) ? 1.0f : -1.0f; 
+                        memory.NextStrafeSwitch = currentTime + 1.5f;
+                    }
+
+                    bool isAfraid = currentTime < memory.FearEndTime;
+                    bool isEscaping = currentTime < memory.EscapeEndTime;
+                    float driftFactor = (float)Math.Sin(currentTime * 3.5f + bot.Index) * 0.4f;
+
+                    // --- MASTER KINEMATIC BLENDER ---
+                    if (isEscaping)
+                    {
+                        finalMoveDir = new Vector((memory.EscapeVector.X * 1.5f) + (pursuitDir.X * 0.2f), (memory.EscapeVector.Y * 1.5f) + (pursuitDir.Y * 0.2f), 0);
+                    }
+                    else if (isPincering && distance > 120.0f)
+                    {
+                        // Blending Pursuit, Flanking, and Drift
+                        finalMoveDir = new Vector((pursuitDir.X * 0.5f) + (pincerWrapDir.X * 1.0f) + (strafeDir.X * driftFactor), 
+                                                  (pursuitDir.Y * 0.5f) + (pincerWrapDir.Y * 1.0f) + (strafeDir.Y * driftFactor), 0);
+                    }
+                    else if (isAfraid)
+                    {
+                        Vector evadeDir = new Vector(-targetForward.Y * memory.StrafeDirection, targetForward.X * memory.StrafeDirection, 0);
+                        finalMoveDir = new Vector((evadeDir.X * 1.2f) + (pursuitDir.X * 0.3f), (evadeDir.Y * 1.2f) + (pursuitDir.Y * 0.3f), 0);
+                    }
+                    else if (distance > 130.0f) 
+                    {
+                        finalMoveDir = new Vector((pursuitDir.X * 0.8f) + (strafeDir.X * driftFactor), (pursuitDir.Y * 0.8f) + (strafeDir.Y * driftFactor), 0);
+                    }
+                    else if (distance > 80.0f) 
+                    {
+                        finalMoveDir = new Vector((pursuitDir.X * 0.1f) + (strafeDir.X * 1.0f), (pursuitDir.Y * 0.1f) + (strafeDir.Y * 1.0f), 0);
+                    }
+                    else 
+                    {
+                        finalMoveDir = new Vector((-pursuitDir.X * 0.3f) + (strafeDir.X * 0.8f), (-pursuitDir.Y * 0.3f) + (strafeDir.Y * 0.8f), 0);
+                    }
+
+                    if (isAirborne) finalMoveDir = new Vector(finalMoveDir.X * 1.2f, finalMoveDir.Y * 1.2f, 0);
+
+                    // Add Repulsion
+                    finalMoveDir.X += memory.RepulsionForce.X;
+                    finalMoveDir.Y += memory.RepulsionForce.Y;
+                    finalMoveDir = NormalizeVector(finalMoveDir);
+                    
+                    Vector injectedVelocity = new Vector(finalMoveDir.X * moveSpeed, finalMoveDir.Y * moveSpeed, currentVel.Z);
+
+                    // --- PRO CROSSHAIR PLACEMENT ---
+                    float deltaX = targetPos.X - botPos.X;
+                    float deltaY = targetPos.Y - botPos.Y;
+                    float deltaZ = (targetPos.Z + 50.0f) - (botPos.Z + 50.0f); 
+
+                    float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
+                    float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
+
+                    perfectPitch = Math.Clamp(perfectPitch, -15.0f, 15.0f);
+
+                    float currentYaw = botAngles.Y;
+                    float currentPitch = botAngles.X;
+
+                    float newYaw = currentYaw + NormalizeAngle(perfectYaw - currentYaw) * memory.CurrentAimSpeed;
+                    float newPitch = currentPitch + NormalizeAngle(perfectPitch - currentPitch) * memory.CurrentAimSpeed;
+                    newPitch = Math.Clamp(newPitch, -15.0f, 15.0f); 
+                    
+                    var smoothedAngles = new QAngle(newPitch, newYaw, 0);
+                    botPawn.Teleport(null, smoothedAngles, injectedVelocity);
+
+                    // --- DYNAMIC TRIGGER CONE ---
+                    float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
+                    float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
+                    float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
+                    float allowedPitchDiff = 15.0f;
+
+                    if (currentTime >= memory.NextFireTime && distance <= 140.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    {
+                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                        memory.NextFireTime = currentTime + 0.3f;
+                    }
+                }
+            }
+        }
+
+        private float NormalizeAngle(float angle)
+        {
+            while (angle > 180) angle -= 360;
+            while (angle < -180) angle += 360;
+            return angle;
+        }
+
+        private Vector GetForwardVector(QAngle angles)
+        {
+            float pitchRad = angles.X * (float)(Math.PI / 180.0);
+            float yawRad = angles.Y * (float)(Math.PI / 180.0);
+            return new Vector(
+                (float)(Math.Cos(yawRad) * Math.Cos(pitchRad)),
+                (float)(Math.Sin(yawRad) * Math.Cos(pitchRad)),
+                (float)(-Math.Sin(pitchRad))
+            );
+        }
+
+        private Vector GetNormalizedVector(Vector from, Vector to)
+        {
+            Vector dir = new Vector(to.X - from.X, to.Y - from.Y, to.Z - from.Z);
+            return NormalizeVector(dir);
+        }
+
+        private Vector NormalizeVector(Vector vec)
+        {
+            float length = (float)Math.Sqrt(vec.X * vec.X + vec.Y * vec.Y + vec.Z * vec.Z);
+            if (length == 0) return new Vector(0, 0, 0);
+            return new Vector(vec.X / length, vec.Y / length, vec.Z / length);
+        }
+
+        private float DotProduct(Vector v1, Vector v2)
+        {
+            return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
         {
             var weaponServices = botPawn.WeaponServices;
-            if (weaponServices == null) return;
-        
+            if (weaponServices == null || weaponServices.MyWeapons == null) return;
+
             bool hasZeus = false;
-            uint taserHandleRaw = 0;
-        
-            // Scan their inventory for the Zeus and grab its exact memory handle
+
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
-                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                if (weapon != null && weapon.IsValid && weapon.DesignerName != null)
                 {
-                    hasZeus = true;
-                    taserHandleRaw = weaponHandle.Raw;
-                    break;
+                    if (weapon.DesignerName.Contains("taser"))
+                    {
+                        hasZeus = true;
+                        if (weapon.Clip1 <= 0)
+                        {
+                            weapon.Clip1 = 1;
+                            Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_iClip1");
+                        }
+                    }
                 }
             }
-        
+
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
-                // We let the engine give them the item; we'll force-equip it on the next tick
             }
-            else
+
+            foreach (var weaponHandle in weaponServices.MyWeapons)
             {
-                var activeWeapon = weaponServices.ActiveWeapon.Value;
-                if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.IsValid && weapon.DesignerName != null)
                 {
-                    // Forcefully jam the Zeus into their active weapon slot
-                    weaponServices.ActiveWeapon.Raw = taserHandleRaw;
+                    string wName = weapon.DesignerName;
                     
-                    // Tell the server to network this change immediately so they don't T-pose
-                    Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                    if (!wName.Contains("taser") && 
+                        !wName.Contains("c4") && 
+                        !wName.Contains("knife") && 
+                        !wName.Contains("bayonet") && 
+                        !wName.Contains("grenade") && 
+                        !wName.Contains("flashbang") && 
+                        !wName.Contains("molotov") && 
+                        !wName.Contains("decoy"))
+                    {
+                        weapon.Remove(); 
+                    }
                 }
             }
         }
 
-        private CCSPlayerController? GetNearestEnemyInFOV(CCSPlayerController bot, CCSPlayerPawn botPawn, List<CCSPlayerController> enemies)
+        private CCSPlayerController? GetHighestPriorityTarget(CCSPlayerController bot, CCSPlayerPawn botPawn, List<CCSPlayerController> enemies)
         {
             CCSPlayerController? bestTarget = null;
-            float shortestDistance = float.MaxValue;
+            float highestThreatScore = -float.MaxValue;
 
-            var botPos = botPawn.AbsOrigin!;
-            var botAngles = botPawn.EyeAngles; // Where the bot is currently looking
-            if (botAngles == null) return null;
+            var botPos = botPawn.AbsOrigin;
+            var botAngles = botPawn.EyeAngles;
+            if (botPos == null || botAngles == null) return null;
 
-            // Convert bot's Pitch/Yaw into a forward-facing 3D vector
-            float pitchRad = botAngles.X * (float)(Math.PI / 180.0);
-            float yawRad = botAngles.Y * (float)(Math.PI / 180.0);
-            Vector botForward = new Vector(
-                (float)(Math.Cos(yawRad) * Math.Cos(pitchRad)),
-                (float)(Math.Sin(yawRad) * Math.Cos(pitchRad)),
-                (float)(-Math.Sin(pitchRad))
-            );
+            Vector botForward = GetForwardVector(botAngles);
 
             foreach (var enemy in enemies)
             {
                 if (enemy.TeamNum == bot.TeamNum) continue;
-
                 var enemyPawn = enemy.PlayerPawn.Value;
-                if (enemyPawn == null) continue;
+                if (enemyPawn == null || enemyPawn.Health <= 0) continue;
+                var enemyPos = enemyPawn.AbsOrigin;
+                var enemyAngles = enemyPawn.EyeAngles;
+                if (enemyPos == null || enemyAngles == null) continue;
 
-                var enemyPos = enemyPawn.AbsOrigin!;
                 float distance = (botPos - enemyPos).Length();
+                if (distance > 1500.0f) continue; 
 
-                // Vector from bot to enemy
-                Vector directionToEnemy = new Vector(enemyPos.X - botPos.X, enemyPos.Y - botPos.Y, enemyPos.Z - botPos.Z);
-                
-                // Normalize it (make its length 1)
-                float length = (float)Math.Sqrt(directionToEnemy.X * directionToEnemy.X + directionToEnemy.Y * directionToEnemy.Y + directionToEnemy.Z * directionToEnemy.Z);
-                directionToEnemy.X /= length;
-                directionToEnemy.Y /= length;
-                directionToEnemy.Z /= length;
+                float threatScore = (1500.0f - distance);
+                Vector dirToEnemy = GetNormalizedVector(botPos, enemyPos);
+                Vector dirToBot = GetNormalizedVector(enemyPos, botPos);
+                Vector enemyForward = GetForwardVector(enemyAngles);
 
-                // Dot product calculates the angle difference. 1.0 is dead center. 0.0 is exactly 90 degrees to the side.
-                // 0.5 roughly translates to a 120-degree cone of vision in front of the bot.
-                float dotProduct = (botForward.X * directionToEnemy.X) + (botForward.Y * directionToEnemy.Y) + (botForward.Z * directionToEnemy.Z);
+                float enemyDot = DotProduct(enemyForward, dirToBot);
+                if (enemyDot > 0.85f) threatScore += 1200.0f; 
+                else if (enemyDot > 0.5f) threatScore += 400.0f; 
 
-                if (dotProduct > 0.5f && distance < shortestDistance)
+                float botDot = DotProduct(botForward, dirToEnemy);
+                if (botDot > 0.7f) threatScore += 400.0f; 
+                else if (botDot < 0.0f) threatScore -= 300.0f; 
+
+                if (distance <= 200.0f) threatScore += 3000.0f; 
+
+                if (threatScore > highestThreatScore)
                 {
-                    shortestDistance = distance;
+                    highestThreatScore = threatScore;
                     bestTarget = enemy;
                 }
             }
-
             return bestTarget;
-        }
-
-        private void StartHumanReaction(CCSPlayerController bot, CCSPlayerPawn botPawn, CCSPlayerPawn targetPawn)
-        {
-            uint botIndex = bot.Index;
-            reactingBots.Add(botIndex);
-
-            // Generate a random reaction time between 150ms and 350ms
-            float reactionTime = (random.NextSingle() * 0.20f) + 0.15f;
-
-            AddTimer(reactionTime, () =>
-            {
-                reactingBots.Remove(botIndex);
-
-                // Ensure both are still alive and valid after the delay
-                if (!bot.IsValid || !bot.PawnIsAlive || !targetPawn.IsValid) return;
-
-                var botPos = botPawn.AbsOrigin;
-                var targetPos = targetPawn.AbsOrigin;
-                if (botPos == null || targetPos == null) return;
-
-                // Re-check distance in case the player dashed away during the reaction time
-                float distance = (botPos - targetPos).Length();
-                if (distance > 190.0f) return;
-
-                // Calculate the perfect shot
-                float deltaX = targetPos.X - botPos.X;
-                float deltaY = targetPos.Y - botPos.Y;
-                float deltaZ = (targetPos.Z + 40.0f) - (botPos.Z + 40.0f); 
-
-                float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
-                float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
-
-                // Add "Panic Inaccuracy" (-5 to +5 degrees off center) so it doesn't look like an aimbot
-                float panicYaw = perfectYaw + ((random.NextSingle() * 10.0f) - 5.0f);
-                float panicPitch = perfectPitch + ((random.NextSingle() * 10.0f) - 5.0f);
-
-                var newAngles = new QAngle(panicPitch, panicYaw, 0);
-                botPawn.Teleport(botPos, newAngles, new Vector(0, 0, 0));
-
-                if (botPawn.MovementServices != null)
-                {
-                    // Inject the +attack command directly into the bot's memory state
-                    botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                    
-                    AddTimer(0.05f, () => 
-                    { 
-                        // Re-validate the pawn after the delay in case they died in that 50ms window
-                        if (bot.IsValid)
-                        {
-                            var currentPawn = bot.PlayerPawn.Value;
-                            if (currentPawn != null && currentPawn.IsValid && currentPawn.MovementServices != null)
-                            {
-                                // Release the trigger
-                                currentPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack; 
-                            }
-                        }
-                    });
-                }
-            });
         }
 
         public override void Unload(bool hotReload)
         {
-            botAiTimer?.Kill();
-            botAiTimer = null;
-            reactingBots.Clear();
+            brainTimer?.Kill();
+            brainTimer = null;
+            botMemory.Clear();
+            RemoveListener<Listeners.OnTick>(InjectKinematicsAndAim);
         }
     }
 }
