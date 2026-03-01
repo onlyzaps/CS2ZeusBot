@@ -207,7 +207,7 @@ namespace ZeusBotAI
 
                 // Completely eliminate cross-map sliding and wall staring by tightening Combat Thresholds
                 float zDiff = Math.Abs(myPos.Z - otherPos.Z);
-                bool isClose = dist < 400f; // Close enough to engage
+                bool isClose = dist < 600f; // Close enough to engage
                 bool sameFloor = zDiff < 70f; // Prevent floor/ceiling staring
                 float dot = MathUtils.DotProduct(myForward, dirToOther);
                 bool inFOV = dot > 0.35f; // Native AI must naturally turn towards them first
@@ -599,7 +599,7 @@ namespace ZeusBotAI
             // Aim Math
             float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
             Vector botHead = new Vector(myPos.X, myPos.Y, myPos.Z + eyeHeight);
-            Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 40f);
+            Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 50f);
             Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
             Vector curForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
             
@@ -917,7 +917,11 @@ namespace ZeusBotAI
                 
                 float dx = targetPos.X - botPos.X;
                 float dy = targetPos.Y - botPos.Y;
-                float dz = (targetPos.Z + 40f) - (botPos.Z + 64f); 
+                
+                // Adjust Z aiming to target chest/head height instead of lower body when closing the distance
+                float enemyChestHeight = 50f;
+                float botEyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
+                float dz = (targetPos.Z + enemyChestHeight) - (botPos.Z + botEyeHeight); 
 
                 float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
