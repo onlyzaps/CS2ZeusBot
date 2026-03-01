@@ -71,18 +71,38 @@ namespace ZeusBotAI
         {
             var weaponServices = botPawn.WeaponServices;
             if (weaponServices == null) return;
-
-            bool hasZeus = weaponServices.MyWeapons?.Any(w => w.Value != null && w.Value.DesignerName.Contains("taser")) ?? false;
-
+        
+            bool hasZeus = false;
+            uint taserHandleRaw = 0;
+        
+            // Scan their inventory for the Zeus and grab its exact memory handle
+            foreach (var weaponHandle in weaponServices.MyWeapons)
+            {
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                {
+                    hasZeus = true;
+                    taserHandleRaw = weaponHandle.Raw;
+                    break;
+                }
+            }
+        
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
+                // We let the engine give them the item; we'll force-equip it on the next tick
             }
-
-            var activeWeapon = weaponServices.ActiveWeapon.Value;
-            if (activeWeapon != null && !activeWeapon.DesignerName.Contains("taser"))
+            else
             {
-                bot.ExecuteClientCommand("use weapon_taser");
+                var activeWeapon = weaponServices.ActiveWeapon.Value;
+                if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
+                {
+                    // Forcefully jam the Zeus into their active weapon slot
+                    weaponServices.ActiveWeapon.Raw = taserHandleRaw;
+                    
+                    // Tell the server to network this change immediately so they don't T-pose
+                    Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                }
             }
         }
 
