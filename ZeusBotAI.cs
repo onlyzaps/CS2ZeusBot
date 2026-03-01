@@ -6,7 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace ZeusBotAIGoap
+namespace ZeusBotAI
 {
     #region GOAP Core & Enums
     public enum StateKey
