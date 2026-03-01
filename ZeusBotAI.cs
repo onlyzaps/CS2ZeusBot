@@ -584,13 +584,26 @@ namespace ZeusBotAI
             Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
             Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
 
+            // We only enter combat mode if we are actually close enough to fight (800 units) 
+            // OR if our threat level indicates they are actively shooting us/looking at us.
             bool inCombatMode = dist < 800f && agent.Blackboard.CurrentTargetFact.ThreatLevel > 500f;
 
             if (!inCombatMode)
             {
-                // Calm approach: linear sprint to close distance without erratic jumping
+                // Navigate gracefully towards the general area using standard routing (pull knife to run faster)
                 agent.Blackboard.DesiredMoveDirection = dirToTarget;
-                agent.Blackboard.DesiredSpeed = 250f;
+                agent.Blackboard.DesiredSpeed = 250f; // Standard CS2 run speed
+                
+                // Allow occasional jumps over obstacles but not erratic spamming
+                if (((uint)agent.Pawn.Flags & 1) != 0 && Server.CurrentTime > agent.Blackboard.JumpCooldown)
+                {
+                    // Check if stuck or running into a wall (very simple heuristic)
+                    if (agent.Pawn.AbsVelocity!.Length() < 50f)
+                    {
+                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                        agent.Blackboard.JumpCooldown = Server.CurrentTime + 1.0f;
+                    }
+                }
                 return;
             }
 
@@ -710,6 +723,16 @@ namespace ZeusBotAI
                 float distToTarget = (targetPos - myPos).Length();
                 Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
                 Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+
+                bool inCombatMode = distToTarget < 800f && agent.Blackboard.CurrentTargetFact.ThreatLevel > 500f;
+
+                if (!inCombatMode)
+                {
+                    // This is a safety catch. If they are holding a Zeus but aren't actively threatened yet, just walk towards them without shooting.
+                    agent.Blackboard.DesiredMoveDirection = dirToTarget;
+                    agent.Blackboard.DesiredSpeed = 250f;
+                    return;
+                }
 
                 bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
                 float currentTime = Server.CurrentTime;
@@ -991,6 +1014,16 @@ namespace ZeusBotAI
                 }
 
                 ProcessAgentIntelligence(agent, currentTime, dt);
+                
+                // Final safety switch: Ensure NO combat buttons are pressed if Threat is extremely low
+                if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel <= 100f)
+                {
+                    // Erase crouching and attack bindings if we aren't in active combat
+                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Duck);
+                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Attack);
+                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Attack2);
+                }
+
                 InjectMotorCommands(agent);
             }
         }
