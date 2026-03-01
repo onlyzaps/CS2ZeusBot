@@ -332,15 +332,16 @@ namespace ZeusBotAI
             Cost = 2f; 
         }
         
+        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
+        
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime;
-        
-        public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.5f;
         
         public override void Execute(BotAgent agent, float dt)
         {
             agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); 
             agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
+            agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.8f;
         }
     }
 
@@ -354,10 +355,10 @@ namespace ZeusBotAI
             Effects.Values[StateKey.TargetDead] = true;
             Cost = 3f; 
         }
+        
+        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
 
         public override bool IsDone(BotAgent agent) => agent.Blackboard.ActionCooldown > Server.CurrentTime || !HasWeapon(agent, "hegrenade");
-
-        public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f;
 
         public override void Execute(BotAgent agent, float dt)
         {
@@ -382,6 +383,7 @@ namespace ZeusBotAI
             else
             {
                 agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+                agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f; // Triggers done state and puts on cooldown
             }
         }
         
@@ -458,7 +460,9 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent) 
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
-            return (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length() <= 190f; // Tighter Zeus range
+            float targetDist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+            bool hasZeus = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
+            return targetDist <= (hasZeus ? 190f : 65f); // Close the entire gap if forced to use knife
         }
         public override void Execute(BotAgent agent, float dt)
         {
@@ -496,6 +500,8 @@ namespace ZeusBotAI
 
     public class ActionEngageZeus : GoapAction
     {
+        private float attemptGiveUpTime = 0f;
+
         public ActionEngageZeus()
         {
             Name = "Engage with Zeus";
@@ -503,10 +509,17 @@ namespace ZeusBotAI
             Preconditions.Values[StateKey.HasZeus] = true;
             Effects.Values[StateKey.TargetDead] = true;
         }
-        public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
-        public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime;
         
-        public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.2f; // Cooldown to re-evaluate after shooting
+        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
+        
+        public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
+        public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime || Server.CurrentTime > attemptGiveUpTime;
+        
+        public override void OnEnter(BotAgent agent) 
+        {
+            attemptGiveUpTime = Server.CurrentTime + 2.0f; // Give it 2 seconds max to line up the perfect shot
+        }
+        
         public override void Execute(BotAgent agent, float dt)
         {
             if (agent.Blackboard.CurrentTargetFact != null)
@@ -524,12 +537,14 @@ namespace ZeusBotAI
                 Vector currentForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
                 
                 float aimDot = MathUtils.DotProduct(currentForward, exactDir);
-                float dist = (enemyChest - botHead).Length();
+                float dist = (botHead - enemyChest).Length();
                 
-                // A dot product of ~0.995 is within a very tight cone to guarantee a hit
-                if (aimDot > 0.99f || (dist < 100f && aimDot > 0.96f)) // More forgiving at point blank
+                // Loosen dot product. 0.99f was way too tight and caused it to hold shots infinitely.
+                if (aimDot > 0.96f || (dist < 150f && aimDot > 0.85f)) 
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+                    // Cooldown triggered specifically AFTER firing, letting the action finish and exit
+                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.2f; 
                 }
             }
         }
@@ -552,10 +567,39 @@ namespace ZeusBotAI
             }
             else if (goal is GoalKillEnemy)
             {
+                bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
+                
+                // Ensure they explicitly equip the best weapon before trying to use it
+                var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+                if (activeWeapon == null || (!activeWeapon.DesignerName.Contains("taser") && !activeWeapon.DesignerName.Contains("knife")))
+                {
+                    if (hasZeus)
+                    {
+                        var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
+                        if (equipAction != null) bestPlan.Add(equipAction);
+                    }
+                    else
+                    {
+                        var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
+                        if (equipKnife != null) bestPlan.Add(equipKnife);
+                    }
+                }
+
+                // Push approach phase
                 if (!startState.Values.GetValueOrDefault(StateKey.TargetInZeusRange, false))
                     bestPlan.Add(usableActions.First(a => a is ActionApproachTarget));
                 
-                bestPlan.Add(usableActions.First(a => a is ActionEngageZeus)); 
+                // Push engagement phase
+                if (hasZeus)
+                {
+                    var engageZeus = usableActions.FirstOrDefault(a => a is ActionEngageZeus);
+                    if (engageZeus != null) bestPlan.Add(engageZeus);
+                }
+                else
+                {
+                    var engageKnife = usableActions.FirstOrDefault(a => a is ActionEngageKnife);
+                    if (engageKnife != null) bestPlan.Add(engageKnife);
+                }
             }
 
             return new Queue<GoapAction>(bestPlan);
