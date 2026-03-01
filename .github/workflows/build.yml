@@ -1,4 +1,78 @@
-- name: Delete All Previous Releases and Tags
+name: Build and Release Zeus Bot AI Plugin
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - '.github/workflows/**'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET 8.0
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Fetch Latest CounterStrikeSharp API
+      run: |
+        LATEST_URL=$(curl -s https://api.github.com/repos/roflmuffin/CounterStrikeSharp/releases/latest | jq -r '.assets[] | select(.name | contains("counterstrikesharp-with-runtime")) | .browser_download_url' | head -n 1)
+        echo "Downloading CS# from: $LATEST_URL"
+        wget -qO cs_sharp.zip "$LATEST_URL"
+        
+        unzip -q cs_sharp.zip -d cs_sharp_temp
+        mkdir -p lib
+        find cs_sharp_temp -name "CounterStrikeSharp.API.dll" -exec cp {} lib/ \;
+        rm -rf cs_sharp.zip cs_sharp_temp
+
+    - name: Generate .csproj File
+      run: |
+        cat <<EOF > ZeusBotAI.csproj
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>net8.0</TargetFramework>
+            <ImplicitUsings>enable</ImplicitUsings>
+            <Nullable>enable</Nullable>
+            <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+          </PropertyGroup>
+          <ItemGroup>
+            <Reference Include="CounterStrikeSharp.API">
+              <HintPath>lib/CounterStrikeSharp.API.dll</HintPath>
+              <Private>false</Private>
+            </Reference>
+          </ItemGroup>
+        </Project>
+        EOF
+
+    - name: Build Plugin
+      run: dotnet publish ZeusBotAI.csproj -c Release -o ./publish
+
+    - name: Package Plugin into Zip
+      run: |
+        # Create the required folder structure
+        mkdir -p package/counterstrikesharp/plugins/ZeusBotAI/
+        
+        # Move the compiled dll into the structure
+        cp ./publish/ZeusBotAI.dll package/counterstrikesharp/plugins/ZeusBotAI/
+        
+        # Navigate in, zip the folder, and move the zip back to the root workspace
+        cd package
+        zip -r ../ZeusBotAI-1.0.zip counterstrikesharp/
+        cd ..
+
+    - name: Delete All Previous Releases and Tags
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
@@ -28,3 +102,14 @@
             git tag -d "$tag" || true
           fi
         done
+
+    - name: Create GitHub Release v1.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Upload the zip file as v1.0 and explicitly target the current commit SHA
+        gh release create "v1.0" ZeusBotAI-1.0.zip \
+          --title "Zeus Bot AI v1.0" \
+          --notes "Automated release of Zeus Bot AI version 1.0." \
+          --latest \
+          --target ${{ github.sha }}
