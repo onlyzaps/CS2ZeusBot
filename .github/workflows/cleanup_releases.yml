@@ -1,0 +1,20 @@
+name: Cleanup Old Releases
+
+on:
+  release:
+    types: [published] # Runs automatically every time you publish a new release
+
+jobs:
+  delete-old-releases:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Strictly required so the action has permission to delete releases and tags
+      
+    steps:
+      - name: Delete all releases except the latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # List up to 100 releases, skip the newest one, extract the tags, and delete them
+          gh release list --repo ${{ github.repository }} --limit 100 --json tagName --jq '.[1:][].tagName' | \
+          xargs -I {} gh release delete {} --repo ${{ github.repository }} --cleanup-tag -y
