@@ -8,42 +8,67 @@ using System.Linq;
 
 namespace ZeusBotAI
 {
+    // A dedicated memory class for each bot to track its combat state smoothly
+    public class CombatState
+    {
+        public bool IsEngaging { get; set; } = false;
+        public bool IsReacting { get; set; } = false;
+        public ulong CurrentStrafeKey { get; set; } = 0;
+        public float NextStrafeSwitch { get; set; } = 0f;
+        public ulong CurrentMovementMask { get; set; } = 0;
+        public float JumpCooldown { get; set; } = 0f;
+    }
+
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Threat Matrix Integration)";
-        public override string ModuleVersion => "1.3.2";
-        private CounterStrikeSharp.API.Modules.Timers.Timer? botAiTimer;
+        public override string ModuleName => "Zeus Bot AI (Advanced Combat State Machine)";
+        public override string ModuleVersion => "2.0.0";
         
-        // Tracks which bots are currently "reacting" so we don't spam timers on them
-        private readonly HashSet<uint> reactingBots = new HashSet<uint>();
+        private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
+        private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
         private readonly Random random = new Random();
 
         public override void Load(bool hotReload)
         {
-            // Run our main scanner 10 times a second
-            botAiTimer = AddTimer(0.1f, RunBotScanner, TimerFlags.REPEAT);
-            Console.WriteLine("[Zeus Bot AI] Dynamic Threat Matrix and dodging loaded.");
+            // The Brain: Processes situational awareness 10 times a second
+            brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
+            
+            // The Nervous System: Injects physical movement keystrokes 64 times a second
+            RegisterListener<Listeners.OnTick>(InjectMovementPhysics);
+            
+            Console.WriteLine("[Zeus Bot AI] v2.0 Tactical State Machine loaded. Jitter fixed.");
         }
 
-        private void RunBotScanner()
+        private void ProcessBotBrains()
         {
             var players = Utilities.GetPlayers();
             var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
-            
+            var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && !p.IsBot).ToList();
+
             if (!bots.Any()) return;
 
-            var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && !p.IsBot).ToList();
+            float currentTime = Server.CurrentTime;
 
             foreach (var bot in bots)
             {
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn == null) continue;
 
-                // If this bot is already in the middle of a reaction delay, leave them alone
-                if (reactingBots.Contains(bot.Index)) continue;
+                if (!botMemory.TryGetValue(bot.Index, out var memory))
+                {
+                    memory = new CombatState();
+                    botMemory[bot.Index] = memory;
+                }
 
                 var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
-                if (target == null) continue;
+                
+                // If no valid target is nearby, release movement control to the default CS2 Bot AI
+                if (target == null) 
+                {
+                    memory.IsEngaging = false;
+                    memory.CurrentMovementMask = 0;
+                    continue;
+                }
 
                 var targetPawn = target.PlayerPawn.Value;
                 if (targetPawn == null) continue;
@@ -54,44 +79,157 @@ namespace ZeusBotAI
 
                 float distance = (botOrigin - targetOrigin).Length();
 
-                // CONCEALED CARRY & MOVEMENT LOGIC
-                if (distance <= 500.0f)
+                if (distance <= 600.0f)
                 {
+                    memory.IsEngaging = true;
                     EnsureBotHasAndHoldsZeus(bot, botPawn);
 
-                    // If they are outside zap range but close enough to push, inject chaotic movement
-                    if (distance > 180.0f)
-                    {
-                        // 15% chance per tick (0.1s) to jump, simulating a frantic push
-                        if (random.NextDouble() < 0.15 && botPawn.MovementServices != null)
-                        {
-                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
-                            
-                            // Add a mid-air crouch 100ms later to tuck their legs (harder to hit)
-                            AddTimer(0.1f, () => {
-                                if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
-                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
-                            });
+                    ulong newMask = 0;
 
-                            // Release the buttons half a second later so they can land and run
-                            AddTimer(0.5f, () => {
-                                if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
-                                {
-                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Jump;
-                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Duck;
-                                }
-                            });
-                        }
-                    }
-                    // If they close the gap to 180 units, pull the trigger
-                    else if (distance <= 180.0f)
+                    // --- STRAFE DIRECTION LOGIC ---
+                    // Randomly switch left/right strafing to be unpredictable (every 0.4 to 1.5 seconds)
+                    if (currentTime > memory.NextStrafeSwitch)
                     {
-                        StartHumanReaction(bot, botPawn, targetPawn);
+                        memory.CurrentStrafeKey = random.NextDouble() > 0.5 ? (ulong)PlayerButtons.Moveleft : (ulong)PlayerButtons.Moveright;
+                        memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.1f + 0.4f);
                     }
+                    newMask |= memory.CurrentStrafeKey;
+
+                    // --- TACTICAL DISTANCE MANAGEMENT ---
+                    if (distance > 250.0f)
+                    {
+                        // Serpentine Approach: Close the gap fast but zig-zag
+                        newMask |= (ulong)PlayerButtons.Forward;
+                    }
+                    else if (distance < 130.0f)
+                    {
+                        // Tactical Retreat: Kiting backward if the human pushes too hard
+                        newMask |= (ulong)PlayerButtons.Back;
+                    }
+                    // If distance is between 130 and 250, do not press W or S. purely circle-strafe using the A/D keys assigned above.
+
+                    // --- EVASIVE MANEUVERS (Bunnyhopping & Duck-peeking) ---
+                    if (currentTime > memory.JumpCooldown && random.NextDouble() < 0.15)
+                    {
+                        newMask |= (ulong)PlayerButtons.Jump;
+                        memory.JumpCooldown = currentTime + 1.2f; // Don't spam jump too fast
+                        
+                        // Mid-air crouch injection
+                        AddTimer(0.15f, () => {
+                            if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
+                                bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
+                        });
+                    }
+
+                    memory.CurrentMovementMask = newMask;
+
+                    // --- THE KILL SHOT ---
+                    if (distance <= 170.0f && !memory.IsReacting)
+                    {
+                        ExecuteFlickShot(bot, botPawn, targetPawn, memory);
+                    }
+                }
+                else
+                {
+                    memory.IsEngaging = false;
+                    memory.CurrentMovementMask = 0;
                 }
             }
         }
 
+        private void InjectMovementPhysics()
+        {
+            foreach (var kvp in botMemory)
+            {
+                var memory = kvp.Value;
+                if (!memory.IsEngaging || memory.CurrentMovementMask == 0) continue; 
+
+                var bot = Utilities.GetPlayerFromIndex((int)kvp.Key);
+                if (bot != null && bot.IsValid && bot.PawnIsAlive && bot.PlayerPawn.Value?.MovementServices != null)
+                {
+                    // 1. Strip the default Bot AI's movement intentions
+                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~((ulong)PlayerButtons.Forward | (ulong)PlayerButtons.Back | (ulong)PlayerButtons.Moveleft | (ulong)PlayerButtons.Moveright);
+                    
+                    // 2. Inject our State Machine's continuous movement mask
+                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= memory.CurrentMovementMask;
+                }
+            }
+        }
+
+        private void ExecuteFlickShot(CCSPlayerController bot, CCSPlayerPawn botPawn, CCSPlayerPawn targetPawn, CombatState memory)
+        {
+            memory.IsReacting = true;
+
+            var botPos = botPawn.AbsOrigin;
+            var targetPos = targetPawn.AbsOrigin;
+            var botAngles = botPawn.EyeAngles;
+
+            if (botPos == null || targetPos == null || botAngles == null)
+            {
+                memory.IsReacting = false;
+                return;
+            }
+
+            float deltaX = targetPos.X - botPos.X;
+            float deltaY = targetPos.Y - botPos.Y;
+            float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
+
+            float currentYaw = botAngles.Y;
+            float yawDifference = Math.Abs(perfectYaw - currentYaw);
+            if (yawDifference > 180.0f) yawDifference = 360.0f - yawDifference;
+
+            // Fluid flick timing based on degree of angle change
+            float baseReaction = (random.NextSingle() * 0.08f) + 0.08f;
+            float flickPenalty = (yawDifference / 180.0f) * 0.12f; 
+            float reactionTime = baseReaction + flickPenalty;
+
+            AddTimer(reactionTime, () =>
+            {
+                memory.IsReacting = false;
+
+                if (!bot.IsValid || !bot.PawnIsAlive || !targetPawn.IsValid) return;
+
+                var newBotPos = botPawn.AbsOrigin;
+                var newTargetPos = targetPawn.AbsOrigin;
+                if (newBotPos == null || newTargetPos == null) return;
+
+                float distance = (newBotPos - newTargetPos).Length();
+                if (distance > 185.0f) return; // The human strafed out of range during our reaction time! Cancel shot.
+
+                deltaX = newTargetPos.X - newBotPos.X;
+                deltaY = newTargetPos.Y - newBotPos.Y;
+                float deltaZ = (newTargetPos.Z + 40.0f) - (newBotPos.Z + 40.0f); 
+
+                perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
+                float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
+
+                float inaccuracyScale = 1.0f + ((yawDifference / 180.0f) * 2.5f);
+                float panicYaw = perfectYaw + ((random.NextSingle() * (inaccuracyScale * 2)) - inaccuracyScale);
+                float panicPitch = perfectPitch + ((random.NextSingle() * (inaccuracyScale * 2)) - inaccuracyScale);
+
+                var newAngles = new QAngle(panicPitch, panicYaw, 0);
+                
+                // THE FIX: Pass NULL to position and velocity. 
+                // This updates their aim instantly without killing their momentum!
+                botPawn.Teleport(null, newAngles, null);
+
+                if (botPawn.MovementServices != null)
+                {
+                    botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                    
+                    AddTimer(0.05f, () => 
+                    { 
+                        if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
+                        {
+                            bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack; 
+                        }
+                    });
+                }
+            });
+        }
+
+        // ... [GetHighestPriorityTarget, EnsureBotHasAndHoldsZeus, DotProduct, etc. remain identical to the previous version]
+        
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
         {
             var weaponServices = botPawn.WeaponServices;
@@ -100,7 +238,6 @@ namespace ZeusBotAI
             bool hasZeus = false;
             uint taserHandleRaw = 0;
 
-            // Scan their inventory for the Zeus and grab its exact memory handle
             if (weaponServices.MyWeapons != null)
             {
                 foreach (var weaponHandle in weaponServices.MyWeapons)
@@ -118,17 +255,13 @@ namespace ZeusBotAI
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
-                // We let the engine give them the item; we'll force-equip it on the next tick
             }
             else
             {
                 var activeWeapon = weaponServices.ActiveWeapon.Value;
                 if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
                 {
-                    // Forcefully jam the Zeus into their active weapon slot via memory manipulation
                     weaponServices.ActiveWeapon.Raw = taserHandleRaw;
-                    
-                    // Tell the server to network this change immediately so they don't T-pose
                     Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
                 }
             }
@@ -157,128 +290,44 @@ namespace ZeusBotAI
                 if (enemyPos == null || enemyAngles == null) continue;
 
                 float distance = (botPos - enemyPos).Length();
-                if (distance > 1500.0f) continue; // Ignore enemies across the map
+                if (distance > 1500.0f) continue; 
 
-                float threatScore = 0;
-
-                // 1. DISTANCE: Base threat (Closer = exponentially more threatening)
-                threatScore += (1500.0f - distance);
+                float threatScore = (1500.0f - distance);
 
                 Vector dirToEnemy = GetNormalizedVector(botPos, enemyPos);
                 Vector dirToBot = GetNormalizedVector(enemyPos, botPos);
                 Vector enemyForward = GetForwardVector(enemyAngles);
 
-                // 2. ENEMY READINESS: Is the enemy looking at the bot?
                 float enemyDot = DotProduct(enemyForward, dirToBot);
-                if (enemyDot > 0.85f) 
-                    threatScore += 600.0f; // MASSIVE THREAT: They are aiming at the bot
-                else if (enemyDot > 0.5f) 
-                    threatScore += 250.0f; // They are looking in the bot's general direction
+                if (enemyDot > 0.85f) threatScore += 1200.0f; 
+                else if (enemyDot > 0.5f) threatScore += 400.0f; 
 
-                // 3. BOT MOMENTUM: Is the bot already looking at them?
                 float botDot = DotProduct(botForward, dirToEnemy);
-                if (botDot > 0.7f) 
-                    threatScore += 400.0f; // Human commitment: prioritize targets in front of us
-                else if (botDot < 0.0f) 
-                    threatScore -= 300.0f; // Human reluctance: penalize targets behind us (avoid 180 flicks)
+                if (botDot > 0.7f) threatScore += 400.0f; 
+                else if (botDot < 0.0f) threatScore -= 300.0f; 
 
-                // 4. WEAPON STATE: Are they defenseless?
                 var weaponServices = enemyPawn.WeaponServices;
                 if (weaponServices?.ActiveWeapon?.Value != null)
                 {
                     string weaponName = weaponServices.ActiveWeapon.Value.DesignerName ?? "";
-                    if (weaponName.Contains("grenade") || weaponName.Contains("flashbang") || weaponName.Contains("smokegrenade") || weaponName.Contains("decoy") || weaponName.Contains("molotov") || weaponName.Contains("incgrenade") || weaponName.Contains("c4"))
-                    {
-                        threatScore -= 400.0f; // Defenseless target, lower priority
-                    }
+                    if (weaponName.Contains("grenade") || weaponName.Contains("flashbang") || weaponName.Contains("smokegrenade") || weaponName.Contains("c4"))
+                        threatScore -= 600.0f; 
                     else if (weaponName.Contains("knife"))
-                    {
-                        threatScore -= 150.0f; // Only a threat if super close
-                    }
+                        threatScore -= 150.0f; 
                     else 
-                    {
-                        threatScore += 200.0f; // Armed target, higher priority
-                    }
+                        threatScore += 300.0f; 
                 }
 
-                // 5. THE ZEUS OVERRIDE
-                if (distance <= 200.0f)
-                {
-                    threatScore += 2000.0f; // If anyone is inside Zap range, kill them immediately
-                }
+                if (distance <= 200.0f) threatScore += 3000.0f; 
 
-                // Final tally
                 if (threatScore > highestThreatScore)
                 {
                     highestThreatScore = threatScore;
                     bestTarget = enemy;
                 }
             }
-
             return bestTarget;
         }
-
-        private void StartHumanReaction(CCSPlayerController bot, CCSPlayerPawn botPawn, CCSPlayerPawn targetPawn)
-        {
-            uint botIndex = bot.Index;
-            reactingBots.Add(botIndex);
-
-            // Generate a random reaction time between 150ms and 350ms
-            float reactionTime = (random.NextSingle() * 0.20f) + 0.15f;
-
-            AddTimer(reactionTime, () =>
-            {
-                reactingBots.Remove(botIndex);
-
-                // Ensure both are still alive and valid after the delay
-                if (!bot.IsValid || !bot.PawnIsAlive || !targetPawn.IsValid) return;
-
-                var botPos = botPawn.AbsOrigin;
-                var targetPos = targetPawn.AbsOrigin;
-                if (botPos == null || targetPos == null) return;
-
-                // Re-check distance in case the player dashed away during the reaction time
-                float distance = (botPos - targetPos).Length();
-                if (distance > 190.0f) return;
-
-                // Calculate the perfect shot
-                float deltaX = targetPos.X - botPos.X;
-                float deltaY = targetPos.Y - botPos.Y;
-                float deltaZ = (targetPos.Z + 40.0f) - (botPos.Z + 40.0f); 
-
-                float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
-                float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
-
-                // Add Tightened "Panic Inaccuracy" (-2 to +2 degrees off center)
-                float panicYaw = perfectYaw + ((random.NextSingle() * 4.0f) - 2.0f);
-                float panicPitch = perfectPitch + ((random.NextSingle() * 4.0f) - 2.0f);
-
-                var newAngles = new QAngle(panicPitch, panicYaw, 0);
-                botPawn.Teleport(botPos, newAngles, new Vector(0, 0, 0));
-
-                if (botPawn.MovementServices != null)
-                {
-                    // Inject the +attack command directly into the bot's memory state
-                    botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                    
-                    AddTimer(0.05f, () => 
-                    { 
-                        // Re-validate the pawn after the delay in case they died in that 50ms window
-                        if (bot.IsValid)
-                        {
-                            var currentPawn = bot.PlayerPawn.Value;
-                            if (currentPawn != null && currentPawn.IsValid && currentPawn.MovementServices != null)
-                            {
-                                // Release the trigger
-                                currentPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack; 
-                            }
-                        }
-                    });
-                }
-            });
-        }
-
-        // --- 3D VECTOR MATH HELPERS ---
 
         private Vector GetForwardVector(QAngle angles)
         {
@@ -309,9 +358,10 @@ namespace ZeusBotAI
 
         public override void Unload(bool hotReload)
         {
-            botAiTimer?.Kill();
-            botAiTimer = null;
-            reactingBots.Clear();
+            brainTimer?.Kill();
+            brainTimer = null;
+            botMemory.Clear();
+            RemoveListener<Listeners.OnTick>(InjectMovementPhysics);
         }
     }
 }
