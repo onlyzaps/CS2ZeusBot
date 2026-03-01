@@ -118,8 +118,6 @@ namespace ZeusBotAI
         public Fact? CurrentTargetFact = null;
         public float FearTimer = 0f;
         public float ActionCooldown = 0f;
-        public float SpawnTime = 0f;
-        public bool IsAirDodging = false;
         public List<Vector> NearbyAllies = new List<Vector>();
     }
 
@@ -164,7 +162,6 @@ namespace ZeusBotAI
             Vector myForward = MathUtils.GetForwardVector(Pawn.EyeAngles!);
             
             Blackboard.NearbyAllies.Clear();
-            Blackboard.IsAirDodging = false;
 
             foreach (var player in allPlayers)
             {
@@ -201,29 +198,13 @@ namespace ZeusBotAI
                     float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
                     fact.ThreatLevel = (1500f - dist) * 2f; // Distance is a huge factor
                     
-                    bool enemyHasZeus = false;
-                    var activeWep = otherPawn.WeaponServices?.ActiveWeapon.Value;
-                    if (activeWep != null && activeWep.DesignerName != null && activeWep.DesignerName.Contains("taser"))
-                    {
-                        enemyHasZeus = true;
-                    }
-                    
-                    if (enemyAimDot > 0.9f) 
-                    {
-                        fact.ThreatLevel += 3000f; // Aimed at!
-                        
-                        // If enemy has a Zeus and is dangerously close while aiming, start air dodging
-                        if (enemyHasZeus && dist < 450f)
-                        {
-                            Blackboard.IsAirDodging = true;
-                        }
-                    }
+                    if (enemyAimDot > 0.9f) fact.ThreatLevel += 3000f; // Aimed at!
                     if (dist < 300f) fact.ThreatLevel += 5000f; // Immediate combat priority
                     
                     // Trigger Interruption / Fear State if heavily threatened from afar
-                    if (enemyAimDot > 0.95f && dist > 500f && Blackboard.FearTimer < currentTime)
+                    if (enemyAimDot > 0.95f && dist > 800f && Blackboard.FearTimer < currentTime)
                     {
-                        Blackboard.FearTimer = currentTime + 1.2f;
+                        Blackboard.FearTimer = currentTime + 0.8f;
                         Interrupt("High Threat Detected - Evasive Retreat");
                     }
                 }
@@ -263,7 +244,7 @@ namespace ZeusBotAI
             if (Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in Pawn.WeaponServices.MyWeapons)
             {
-                if (w.Value != null && w.Value.DesignerName != null && w.Value.DesignerName.Contains(name)) return true;
+                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
             }
             return false;
         }
@@ -285,7 +266,7 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-            return activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("taser");
+            return activeWeapon != null && activeWeapon.DesignerName.Contains("taser");
         }
 
         public override void Execute(BotAgent agent, float dt)
@@ -319,7 +300,7 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-            return activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("knife");
+            return activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
         }
 
         public override void Execute(BotAgent agent, float dt)
@@ -386,7 +367,7 @@ namespace ZeusBotAI
 
             var activeWeapon = weaponServices.ActiveWeapon.Value;
             
-            if (activeWeapon == null || activeWeapon.DesignerName == null || !activeWeapon.DesignerName.Contains("hegrenade"))
+            if (activeWeapon == null || !activeWeapon.DesignerName.Contains("hegrenade"))
             {
                 foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
@@ -411,7 +392,7 @@ namespace ZeusBotAI
             if (agent.Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in agent.Pawn.WeaponServices.MyWeapons)
             {
-                if (w.Value != null && w.Value.DesignerName != null && w.Value.DesignerName.Contains(name)) return true;
+                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
             }
             return false;
         }
@@ -460,11 +441,8 @@ namespace ZeusBotAI
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 0.5f) + strafe + separation);
                 agent.Blackboard.DesiredSpeed = 250f;
                 
-                // Advanced duck/jump matrix based on frame times - pulse jumps so they actually trigger
-                if (dodgeSine > 0.8f) 
-                {
-                    if ((int)(Server.CurrentTime * 15f) % 2 == 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                }
+                // Advanced duck/jump matrix based on frame times
+                if (dodgeSine > 0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
                 else if (dodgeSine < -0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
         }
@@ -507,7 +485,7 @@ namespace ZeusBotAI
             }
 
             // High pressure movement: they barrel forward but their path wiggles side to side
-            float forwardWeight = (dist < 400f) ? 0.9f : 1.2f;
+            float forwardWeight = (dist < 400f) ? 1.3f : 1.6f;
 
             agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * forwardWeight) + strafe + separation);
             agent.Blackboard.DesiredSpeed = 250f;
@@ -516,8 +494,8 @@ namespace ZeusBotAI
             float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 1.5f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
             if (dist < 500f && dist > 200f && randomJumpChance > 0.8f) 
             {
-                // Bhop spacing - pulse jump so it registers correctly in the engine
-                if ((int)(Server.CurrentTime * 15f) % 2 == 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                // Bhop spacing
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
             }
             else if (dist < 300f && Math.Abs(dodgeSine) > 0.9f) 
             {
@@ -597,7 +575,7 @@ namespace ZeusBotAI
                 
                 // Allow them to "flick". If they aren't dead-on, they don't fire. 
                 // 0.985f is highly lethal but accounts for the heavy ADAD spam they are now doing
-                if (aimDot > 0.985f || (dist < 130f && aimDot > 0.92f)) 
+                if (aimDot > 0.97f || (dist < 130f && aimDot > 0.90f)) 
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
                     agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.0f; 
@@ -627,10 +605,7 @@ namespace ZeusBotAI
                 
                 // Ensure they explicitly equip the best weapon before trying to use it
                 var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-                bool holdingTaser = activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("taser");
-                bool holdingKnife = activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("knife");
-
-                if (!holdingTaser && !holdingKnife)
+                if (activeWeapon == null || (!activeWeapon.DesignerName.Contains("taser") && !activeWeapon.DesignerName.Contains("knife")))
                 {
                     if (hasZeus)
                     {
@@ -645,7 +620,7 @@ namespace ZeusBotAI
                 }
                 
                 // Because Zeus regenerates so fast, don't fallback to knife if we HAVE a zeus. Always try to approach for Zeus.
-                if (hasZeus && holdingKnife)
+                if (hasZeus && activeWeapon != null && activeWeapon.DesignerName.Contains("knife"))
                 {
                      var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
                      if (equipAction != null) bestPlan.Add(equipAction);
@@ -707,64 +682,49 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.4";
+        public override string ModuleVersion => "2.0.3";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
         private int tickCounter = 0;
-        
-        private string[] botNames = new string[] 
+
+        private static readonly string[] BotNames = new string[]
         {
-            "Zappy", "Sparky", "Zeus", "Bolt", "Zip", "Static", "Flicker", "Thor", 
-            "Jolt", "Volt", "Watt", "Amp", "Ohm", "Tesla", "Arc", "Ion", "Surge", 
-            "Livewire", "Shorty", "Buzzer", "Glow", "Indra", "Raiju", "Flash", 
-            "Shock", "Current", "Flux", "Plasma", "Neon", "Zap", "Blitz", "Thunder", 
-            "Storm", "Joule", "Hertz", "Dynamo", "Turbine", "Grid", "Circuit", 
-            "Fuse", "Breaker", "Switch", "Relay", "Spark", "Singe", "Flare", "Beam", 
-            "Ray", "Laser", "Pulse", "Frequency", "Phase", "Ground", "Sparkler", 
-            "Crackle", "Snap", "Pop", "Kinetic", "Battery", "Charge", "Proton", 
-            "Electron", "Neutron", "Faraday"
+            "Zappy", "Sparky", "Zeus", "Bolt", "Zip", "Static", "Flicker", "Thor", "Jolt", "Volt",
+            "Watt", "Amp", "Ohm", "Tesla", "Arc", "Ion", "Surge", "Livewire", "Shorty", "Buzzer",
+            "Glow", "Indra", "Raiju", "Flash", "Shock", "Current", "Flux", "Plasma", "Neon", "Zap",
+            "Blitz", "Thunder", "Storm", "Joule", "Hertz", "Dynamo", "Turbine", "Grid", "Circuit", "Fuse",
+            "Breaker", "Switch", "Relay", "Spark", "Singe", "Flare", "Beam", "Ray", "Laser", "Pulse",
+            "Frequency", "Phase", "Ground", "Sparkler", "Crackle", "Snap", "Pop", "Kinetic", "Battery", "Charge",
+            "Proton", "Electron", "Neutron", "Faraday"
         };
-        private List<string> availableNames = new List<string>();
+        private Dictionary<uint, string> assignedNames = new Dictionary<uint, string>();
+        private Random rnd = new Random();
 
         public override void Load(bool hotReload)
         {
             RegisterListener<Listeners.OnTick>(OnTick);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
-            
-            // Initialize name pool
-            availableNames = new List<string>(botNames);
-            
             Console.WriteLine("[Zeus Bot GOAP] Loaded F.E.A.R. Architecture.");
         }
-        
+
         private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
         {
-            var player = @event.Userid;
-            if (player != null && player.IsValid && player.IsBot)
+            var controller = @event.Userid;
+            if (controller != null && controller.IsValid && controller.IsBot)
             {
-                if (agents.TryGetValue(player.Index, out var agent))
+                if (!assignedNames.ContainsKey(controller.Index))
                 {
-                    agent.Blackboard.SpawnTime = Server.CurrentTime;
+                    assignedNames[controller.Index] = BotNames[rnd.Next(BotNames.Length)];
                 }
                 
-                // Assign a unique name if not already renamed from this pool
-                // Delay to prevent CS2 spawn logic from immediately overwriting
-                AddTimer(0.1f, () =>
-                {
-                    if (player.IsValid)
+                string desiredName = assignedNames[controller.Index];
+
+                Server.NextFrame(() => {
+                    if (controller.IsValid)
                     {
-                        if (!botNames.Contains(player.PlayerName))
-                        {
-                            if (availableNames.Count == 0) availableNames = new List<string>(botNames); // Refill if empty
-                            
-                            int randIdx = new Random().Next(availableNames.Count);
-                            string chosenName = availableNames[randIdx];
-                            availableNames.RemoveAt(randIdx);
-                            
-                            player.PlayerName = chosenName;
-                            Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
-                        }
+                        controller.PlayerName = desiredName;
+                        Utilities.SetStateChanged(controller, "CBasePlayerController", "m_iszPlayerName");
                     }
                 });
             }
@@ -829,78 +789,10 @@ namespace ZeusBotAI
             if (agent.CurrentAction != null)
             {
                 agent.CurrentAction.Execute(agent, dt);
-                
-                // Aggressively force Zeus override if native bot AI swapped to a knife during approach/engage
-                if (agent.CurrentAction is ActionApproachTarget || agent.CurrentAction is ActionEngageZeus)
-                {
-                    bool hasZ = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
-                    if (hasZ)
-                    {
-                        var activeWep = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-                        if (activeWep != null && activeWep.DesignerName != null && activeWep.DesignerName.Contains("knife"))
-                        {
-                            foreach (var wHandle in agent.Pawn!.WeaponServices!.MyWeapons)
-                            {
-                                if (wHandle.Value != null && wHandle.Value.DesignerName != null && wHandle.Value.DesignerName.Contains("taser"))
-                                {
-                                    agent.Pawn.WeaponServices.ActiveWeapon.Raw = wHandle.Raw;
-                                    Utilities.SetStateChanged(agent.Pawn, "CBasePlayerPawn", "m_pWeaponServices");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
                 if (agent.CurrentAction.IsDone(agent))
                 {
                     agent.CurrentAction.OnExit(agent);
                     agent.CurrentAction = null;
-                }
-            }
-            
-            // Intense Air Dodge Override
-            if (agent.Blackboard.IsAirDodging)
-            {
-                agent.Blackboard.ButtonsToPress &= ~(ulong)PlayerButtons.Duck; // Prevent ducking cancelling out the jump
-                if ((int)(Server.CurrentTime * 15f) % 2 == 0) // Pulse jump 
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                }
-                
-                // Extremely unpredictable rapid strafing in mid-air
-                float dodgeSine = (float)Math.Sin(Server.CurrentTime * 35f + agent.Controller.Index);
-                Vector forward = agent.Blackboard.DesiredMoveDirection;
-                if (forward.Length() == 0) forward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
-                
-                Vector strafe = new Vector(-forward.Y, forward.X, 0) * Math.Sign(dodgeSine);
-                
-                // Boost speed and sharply cut left/right
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((forward * 0.1f) + strafe);
-                agent.Blackboard.DesiredSpeed = 350f; 
-            }
-
-            // "Spawn Excitement" / Roll-Out Embellishment
-            if (currentTime - agent.Blackboard.SpawnTime < 10.0f && agent.CurrentAction is not ActionEngageZeus)
-            {
-                float timeActive = currentTime - agent.Blackboard.SpawnTime;
-                
-                // Randomize based on bot index so they don't all sync up
-                float randomWobble = (float)Math.Sin(currentTime * 3f + agent.Controller.Index * 5f);
-                float jumpRNG = (float)Math.Cos(currentTime * 1.5f + agent.Controller.Index);
-                
-                // Trigger an occasional excitement bhop if not currently jumping and not aiming at an enemy
-                if (jumpRNG > 0.85f)
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                    
-                    // While in the air/jumping during rollout, add a gentle left/right wiggle to their view
-                    if (agent.Blackboard.CurrentTargetFact == null)
-                    {
-                        QAngle currentEye = agent.Pawn.EyeAngles!;
-                        float sway = randomWobble * 2.5f; // Small 2.5 degree sway
-                        agent.Blackboard.DesiredAim = new QAngle(currentEye.X, currentEye.Y + sway, currentEye.Z);
-                    }
                 }
             }
 
@@ -923,9 +815,9 @@ namespace ZeusBotAI
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 
                 // Very fast "flicky" aim lerp. Fast enough to track wild ADAD, but smooth enough to not look like a blatant spinbot
-                float aimLerp = 0.35f; 
-                if (dist < 250f || agent.CurrentAction is ActionEngageZeus) aimLerp = 0.65f; // Hard track during engagement
-                if (agent.Blackboard.CurrentTargetFact.ThreatLevel > 2000f) aimLerp = 0.5f; 
+                float aimLerp = 0.55f; 
+                if (dist < 250f || agent.CurrentAction is ActionEngageZeus) aimLerp = 0.85f; // Hard track during engagement
+                if (agent.Blackboard.CurrentTargetFact.ThreatLevel > 2000f) aimLerp = 0.65f; 
                 
                 float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * aimLerp;
                 float newPitch = Math.Clamp(currentPitch + MathUtils.NormalizeAngle(perfectPitch - currentPitch) * aimLerp, -89f, 89f);
@@ -945,13 +837,7 @@ namespace ZeusBotAI
             
             Vector injectedVelocity = new Vector(dir.X * speed, dir.Y * speed, currentVel.Z);
             
-            QAngle outAngles = agent.Pawn.EyeAngles!;
-            
-            // If they are targeting an enemy OR they are wiggling slightly during spawn
-            if (agent.Blackboard.CurrentTargetFact != null || (Server.CurrentTime - agent.Blackboard.SpawnTime < 10.0f))
-            {
-                outAngles = agent.Blackboard.DesiredAim;
-            }
+            QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
             
             pawn.Teleport(null, outAngles, injectedVelocity);
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
@@ -960,8 +846,9 @@ namespace ZeusBotAI
         public override void Unload(bool hotReload)
         {
             RemoveListener<Listeners.OnTick>(OnTick);
-            DeregisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
+            // CounterStrikeSharp usually automatically unregisters event handlers, but we clear our dictionaries
             agents.Clear();
+            assignedNames.Clear();
         }
     }
     #endregion
