@@ -222,13 +222,6 @@ namespace ZeusBotAI
                     fact.ThreatLevel = Math.Max(0, (3000f - dist));
                     if (enemyAimDot > 0.85f) fact.ThreatLevel += 2000f;
                     if (isClose) fact.ThreatLevel += 3000f;
-
-                    // Heavy threat = trigger survive goal
-                    if (enemyAimDot > 0.95f && dist > 1000f && Blackboard.FearTimer < currentTime)
-                    {
-                        Blackboard.FearTimer = currentTime + 0.8f;
-                        Interrupt("Under sniper/heavy fire");
-                    }
                 }
                 else
                 {
@@ -323,16 +316,23 @@ namespace ZeusBotAI
         public override void Execute(BotAgent agent, float dt)
         {
             var weaponServices = agent.Pawn?.WeaponServices;
-            if (weaponServices?.MyWeapons == null) return;
-            foreach (var weaponHandle in weaponServices.MyWeapons)
+            if (weaponServices?.MyWeapons != null)
             {
-                var weapon = weaponHandle.Value;
-                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
-                    weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
-                    Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
-                    break;
+                    var weapon = weaponHandle.Value;
+                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                    {
+                        weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
+                        Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
+                        break;
+                    }
                 }
+            }
+            if (agent.Blackboard.CurrentTargetFact != null)
+            {
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
+                agent.Blackboard.DesiredSpeed = 250f;
             }
         }
     }
@@ -353,16 +353,23 @@ namespace ZeusBotAI
         public override void Execute(BotAgent agent, float dt)
         {
             var weaponServices = agent.Pawn?.WeaponServices;
-            if (weaponServices?.MyWeapons == null) return;
-            foreach (var weaponHandle in weaponServices.MyWeapons)
+            if (weaponServices?.MyWeapons != null)
             {
-                var weapon = weaponHandle.Value;
-                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("knife"))
+                foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
-                    weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
-                    Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
-                    break;
+                    var weapon = weaponHandle.Value;
+                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("knife"))
+                    {
+                        weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
+                        Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
+                        break;
+                    }
                 }
+            }
+            if (agent.Blackboard.CurrentTargetFact != null)
+            {
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
+                agent.Blackboard.DesiredSpeed = 250f;
             }
         }
     }
@@ -943,24 +950,33 @@ namespace ZeusBotAI
             var pawn = agent.Pawn;
             if (pawn?.MovementServices == null || !pawn.IsValid) return;
 
-            // Stop them from walking if there's no desired vector 
-            if (agent.Blackboard.DesiredSpeed == 0f) return;
+            QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
 
-            Vector dir = agent.Blackboard.DesiredMoveDirection;
-            float speed = agent.Blackboard.DesiredSpeed;
-            Vector currentVel = pawn.AbsVelocity!;
-            float zVel = currentVel.Z;
-            
-            // Gravity and physics fix. If they are floating, apply downward velocity so they drop down to the map
-            bool isGrounded = ((uint)pawn.Flags & 1) != 0;
-            if (!isGrounded && zVel > -500f) 
+            // 1. Wipe Native bot AI movement so they stop fighting our commands!
+            ulong moveMask = (ulong)(PlayerButtons.Forward | PlayerButtons.Back | PlayerButtons.Moveleft | PlayerButtons.Moveright | PlayerButtons.Walk | PlayerButtons.Run);
+            pawn.MovementServices.Buttons.ButtonStates[0] &= ~moveMask;
+
+            // 2. Synthesize Native WASD based on aim and DesiredMoveDirection
+            if (agent.Blackboard.DesiredSpeed > 0f && agent.Blackboard.DesiredMoveDirection.Length() > 0)
             {
-                zVel -= 15f; 
+                Vector dir = agent.Blackboard.DesiredMoveDirection;
+                Vector forward = MathUtils.GetForwardVector(outAngles);
+                Vector right = new Vector(-forward.Y, forward.X, 0);
+
+                float fDot = MathUtils.DotProduct(dir, forward);
+                float rDot = MathUtils.DotProduct(dir, right);
+
+                if (fDot > 0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Forward;
+                else if (fDot < -0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Back;
+
+                if (rDot > 0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Moveright;
+                else if (rDot < -0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Moveleft;
             }
 
+            // 3. Jump Safety Block
             if ((agent.Blackboard.ButtonsToPress & (ulong)PlayerButtons.Jump) != 0)
             {
-                // Cliff safety prevention
+                bool isGrounded = ((uint)pawn.Flags & 1) != 0;
                 bool safeToJump = true;
                 if (agent.Blackboard.CurrentTargetFact != null)
                 {
@@ -971,22 +987,18 @@ namespace ZeusBotAI
                     if (zDiff > 100f && xyDist > 200f) safeToJump = false; 
                 }
                 
-                if (isGrounded && safeToJump && Server.CurrentTime > agent.Blackboard.JumpCooldown)
+                if (!isGrounded || !safeToJump || Server.CurrentTime <= agent.Blackboard.JumpCooldown)
                 {
-                    zVel = 300f; // Actual jump force
-                }
-                else
-                {
-                    // Revoke jump button if unsafe so they don't stutter 
                     agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Jump);
                 }
             }
-            
-            Vector injectedVelocity = new Vector(dir.X * speed, dir.Y * speed, zVel);
-            QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
-            
-            pawn.Teleport(null, outAngles, injectedVelocity);
+
+            // 4. Submit buttons to engine
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
+            
+            // 5. Update look angles natively without locking absolute physics!
+            // Passing null for velocity tells CS2 to process WASD friction, gravity, and stair-stepping natively!
+            pawn.Teleport(null, outAngles, null);
         }
 
         public override void Unload(bool hotReload)
