@@ -390,9 +390,8 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent)
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
-            float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-            // If we get close, or they spot us/we spot them (threat spikes), we drop traversal and enter combat approaches.
-            return dist < 600f || agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f;
+            // Only stop traversing when we enter active combat (threat spikes from LOS or close proximity)
+            return agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f;
         }
 
         public override void Execute(BotAgent agent, float dt)
@@ -695,7 +694,7 @@ namespace ZeusBotAI
 
                 bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
 
-                if (!inActiveCombat || dist > 600f)
+                if (!inActiveCombat)
                 {
                     // Far away or tracking behind walls -> Knife sprint
                     var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
@@ -952,28 +951,29 @@ namespace ZeusBotAI
 
             QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
 
-            // 1. Wipe Native bot AI movement so they stop fighting our commands!
-            ulong moveMask = (ulong)(PlayerButtons.Forward | PlayerButtons.Back | PlayerButtons.Moveleft | PlayerButtons.Moveright | PlayerButtons.Walk | PlayerButtons.Run);
-            pawn.MovementServices.Buttons.ButtonStates[0] &= ~moveMask;
+            Vector currentVel = pawn.AbsVelocity ?? new Vector(0,0,0);
+            Vector injectedVelocity = new Vector(currentVel.X, currentVel.Y, currentVel.Z);
 
-            // 2. Synthesize Native WASD based on aim and DesiredMoveDirection
             if (agent.Blackboard.DesiredSpeed > 0f && agent.Blackboard.DesiredMoveDirection.Length() > 0)
             {
-                Vector dir = agent.Blackboard.DesiredMoveDirection;
-                Vector forward = MathUtils.GetForwardVector(outAngles);
-                Vector right = new Vector(-forward.Y, forward.X, 0);
-
-                float fDot = MathUtils.DotProduct(dir, forward);
-                float rDot = MathUtils.DotProduct(dir, right);
-
-                if (fDot > 0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Forward;
-                else if (fDot < -0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Back;
-
-                if (rDot > 0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Moveright;
-                else if (rDot < -0.2f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Moveleft;
+                injectedVelocity.X = agent.Blackboard.DesiredMoveDirection.X * agent.Blackboard.DesiredSpeed;
+                injectedVelocity.Y = agent.Blackboard.DesiredMoveDirection.Y * agent.Blackboard.DesiredSpeed;
+                
+                // Maintain grounded state seamlessly
+                bool isGrounded = ((uint)pawn.Flags & 1) != 0;
+                if (isGrounded)
+                {
+                    injectedVelocity.Z = -15f; 
+                }
+            }
+            else
+            {
+                // Force dead stop if no speed desired so native AI doesn't walk backwards
+                injectedVelocity.X = 0f;
+                injectedVelocity.Y = 0f;
             }
 
-            // 3. Jump Safety Block
+            // Execute Vertical Jump
             if ((agent.Blackboard.ButtonsToPress & (ulong)PlayerButtons.Jump) != 0)
             {
                 bool isGrounded = ((uint)pawn.Flags & 1) != 0;
@@ -987,18 +987,19 @@ namespace ZeusBotAI
                     if (zDiff > 100f && xyDist > 200f) safeToJump = false; 
                 }
                 
-                if (!isGrounded || !safeToJump || Server.CurrentTime <= agent.Blackboard.JumpCooldown)
+                if (isGrounded && safeToJump && Server.CurrentTime > agent.Blackboard.JumpCooldown)
                 {
-                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Jump);
+                    injectedVelocity.Z = 300f; // CS2 explicit jump momentum
                 }
+                // Do not pass the jump button to the backend engine to avoid double-jumping physics conflicts
+                agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Jump);
             }
 
-            // 4. Submit buttons to engine
+            // Submit buttons to engine (Crucial for Shooting / Ducking)
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
-            
-            // 5. Update look angles natively without locking absolute physics!
-            // Passing null for velocity tells CS2 to process WASD friction, gravity, and stair-stepping natively!
-            pawn.Teleport(null, outAngles, null);
+
+            // Teleport rigidly to block backward drifting, applying custom forces
+            pawn.Teleport(null, outAngles, injectedVelocity);
         }
 
         public override void Unload(bool hotReload)
