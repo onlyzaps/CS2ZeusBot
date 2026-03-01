@@ -118,6 +118,7 @@ namespace ZeusBotAI
         public Fact? CurrentTargetFact = null;
         public float FearTimer = 0f;
         public float ActionCooldown = 0f;
+        public float SpawnTime = 0f;
         public List<Vector> NearbyAllies = new List<Vector>();
     }
 
@@ -507,8 +508,6 @@ namespace ZeusBotAI
 
     public class ActionEngageZeus : GoapAction
     {
-        private float attemptGiveUpTime = 0f;
-
         public ActionEngageZeus()
         {
             Name = "Engage with Zeus";
@@ -689,11 +688,56 @@ namespace ZeusBotAI
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
         private int tickCounter = 0;
+        
+        private string[] botNames = new string[] 
+        {
+            "Zappy", "Sparky", "Zeus", "Bolt", "Zip", "Static", "Flicker", "Thor", 
+            "Jolt", "Volt", "Watt", "Amp", "Ohm", "Tesla", "Arc", "Ion", "Surge", 
+            "Livewire", "Shorty", "Buzzer", "Glow", "Indra", "Raiju", "Flash", 
+            "Shock", "Current", "Flux", "Plasma", "Neon", "Zap", "Blitz", "Thunder", 
+            "Storm", "Joule", "Hertz", "Dynamo", "Turbine", "Grid", "Circuit", 
+            "Fuse", "Breaker", "Switch", "Relay", "Spark", "Singe", "Flare", "Beam", 
+            "Ray", "Laser", "Pulse", "Frequency", "Phase", "Ground", "Sparkler", 
+            "Crackle", "Snap", "Pop", "Kinetic", "Battery", "Charge", "Proton", 
+            "Electron", "Neutron", "Faraday"
+        };
+        private List<string> availableNames = new List<string>();
 
         public override void Load(bool hotReload)
         {
             RegisterListener<Listeners.OnTick>(OnTick);
+            RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
+            
+            // Initialize name pool
+            availableNames = new List<string>(botNames);
+            
             Console.WriteLine("[Zeus Bot GOAP] Loaded F.E.A.R. Architecture.");
+        }
+        
+        private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
+        {
+            var player = @event.Userid;
+            if (player != null && player.IsValid && player.IsBot)
+            {
+                if (agents.TryGetValue(player.Index, out var agent))
+                {
+                    agent.Blackboard.SpawnTime = Server.CurrentTime;
+                }
+                
+                // Assign a unique name if not already renamed from this pool
+                if (!botNames.Contains(player.PlayerName))
+                {
+                    if (availableNames.Count == 0) availableNames = new List<string>(botNames); // Refill if empty
+                    
+                    int randIdx = new Random().Next(availableNames.Count);
+                    string chosenName = availableNames[randIdx];
+                    availableNames.RemoveAt(randIdx);
+                    
+                    player.PlayerName = chosenName;
+                    Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
+                }
+            }
+            return HookResult.Continue;
         }
 
         private void OnTick()
@@ -760,6 +804,30 @@ namespace ZeusBotAI
                     agent.CurrentAction = null;
                 }
             }
+            
+            // "Spawn Excitement" / Roll-Out Embellishment
+            if (currentTime - agent.Blackboard.SpawnTime < 10.0f && agent.CurrentAction is not ActionEngageZeus)
+            {
+                float timeActive = currentTime - agent.Blackboard.SpawnTime;
+                
+                // Randomize based on bot index so they don't all sync up
+                float randomWobble = (float)Math.Sin(currentTime * 3f + agent.Controller.Index * 5f);
+                float jumpRNG = (float)Math.Cos(currentTime * 1.5f + agent.Controller.Index);
+                
+                // Trigger an occasional excitement bhop if not currently jumping and not aiming at an enemy
+                if (jumpRNG > 0.85f)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    
+                    // While in the air/jumping during rollout, add a gentle left/right wiggle to their view
+                    if (agent.Blackboard.CurrentTargetFact == null)
+                    {
+                        QAngle currentEye = agent.Pawn.EyeAngles!;
+                        float sway = randomWobble * 2.5f; // Small 2.5 degree sway
+                        agent.Blackboard.DesiredAim = new QAngle(currentEye.X, currentEye.Y + sway, currentEye.Z);
+                    }
+                }
+            }
 
             if (agent.Blackboard.CurrentTargetFact != null)
             {
@@ -802,7 +870,13 @@ namespace ZeusBotAI
             
             Vector injectedVelocity = new Vector(dir.X * speed, dir.Y * speed, currentVel.Z);
             
-            QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
+            QAngle outAngles = agent.Pawn.EyeAngles!;
+            
+            // If they are targeting an enemy OR they are wiggling slightly during spawn
+            if (agent.Blackboard.CurrentTargetFact != null || (Server.CurrentTime - agent.Blackboard.SpawnTime < 10.0f))
+            {
+                outAngles = agent.Blackboard.DesiredAim;
+            }
             
             pawn.Teleport(null, outAngles, injectedVelocity);
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
@@ -811,6 +885,7 @@ namespace ZeusBotAI
         public override void Unload(bool hotReload)
         {
             RemoveListener<Listeners.OnTick>(OnTick);
+            RemoveEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
             agents.Clear();
         }
     }
