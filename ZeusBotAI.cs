@@ -163,13 +163,10 @@ namespace ZeusBotAI
                 float dot = MathUtils.DotProduct(myForward, dirToOther);
                 bool inFOV = dot > 0.35f; // Native AI must naturally turn towards them first
 
-                // Raycast check so bots ignore enemies behind walls
-                float myEyeHeight = ((uint)Pawn.Flags & 2) != 0 ? 46f : 64f;
-                Vector eyePos = new Vector(myPos.X, myPos.Y, myPos.Z + myEyeHeight);
-                Vector enemyChest = new Vector(otherPos.X, otherPos.Y, otherPos.Z + 40f);
-                bool hasLineOfSight = isClose ? TraceUtils.IsVisible(eyePos, enemyChest, (int)Pawn.Index) : false;
+                // Use native CS2 radar/spotted mechanics to evaluate visibility without leaking unmanaged memory
+                bool isSpotted = otherPawn.EntitySpottedState?.Spotted ?? false;
 
-                if (isClose && sameFloor && inFOV && hasLineOfSight)
+                if (isClose && sameFloor && inFOV && isSpotted)
                 {
                     fact.TimeSinceLastSeen = 0f;
                     fact.ThreatLevel = 3000f; // Instantly trigger Custom GOAP Custom Physics
@@ -627,33 +624,6 @@ namespace ZeusBotAI
     #endregion
 
     #region Math Utilities
-    public static class TraceUtils
-    {
-        public static bool IsVisible(Vector start, Vector end, int ignoreEntityIndex)
-        {
-            try 
-            {
-                IntPtr traceFilter = CounterStrikeSharp.API.Core.NativeAPI.NewSimpleTraceFilter(ignoreEntityIndex);
-                IntPtr pTraceResult = CounterStrikeSharp.API.Core.NativeAPI.NewTraceResult();
-                
-                IntPtr ray = CounterStrikeSharp.API.Core.NativeAPI.CreateRay1(0, start.Handle, end.Handle);
-                
-                // MASK_VISIBLE: 0x4600400B
-                CounterStrikeSharp.API.Core.NativeAPI.TraceRay(ray, pTraceResult, traceFilter, 0x4600400B);
-                
-                // Read fraction float at offset 0x50
-                int fractionBits = System.Runtime.InteropServices.Marshal.ReadInt32(pTraceResult, 0x50);
-                float fraction = BitConverter.Int32BitsToSingle(fractionBits);
-                
-                return fraction >= 0.99f;
-            } 
-            catch
-            {
-                return true;
-            }
-        }
-    }
-
     public static class MathUtils
     {
         public static float NormalizeAngle(float angle)
