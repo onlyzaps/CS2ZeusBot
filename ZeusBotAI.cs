@@ -24,7 +24,6 @@ namespace ZeusBotAI
         public float EscapeEndTime { get; set; } = 0f;
         public float NextFireTime { get; set; } = 0f; 
         
-        // --- LADDER LOGIC MEMORY ---
         public bool WasOnLadder { get; set; } = false;
         public float LadderClearTime { get; set; } = 0f;
         public Vector LadderClearDir { get; set; } = new Vector(0, 0, 0);
@@ -32,8 +31,8 @@ namespace ZeusBotAI
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Ladder Logic Fix)";
-        public override string ModuleVersion => "16.1.1";
+        public override string ModuleName => "Zeus Bot AI (Active Trigger Fix)";
+        public override string ModuleVersion => "16.2.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -44,7 +43,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v16.1 Ladder Logic Fix (Scope Patch) loaded.");
+            Console.WriteLine("[Zeus Bot AI] v16.2 Active Trigger Fix loaded.");
         }
 
         private void ProcessBotBrains()
@@ -151,14 +150,12 @@ namespace ZeusBotAI
 
                     Vector pursuitDir = GetNormalizedVector(botPos, targetPos);
 
-                    // --- LADDER LOGIC OVERRIDE ---
                     bool isOnLadder = botPawn.MoveType == MoveType_t.MOVETYPE_LADDER;
 
                     if (isOnLadder)
                     {
                         memory.WasOnLadder = true;
                         
-                        // RENAMED VARIABLES to avoid CS0136 scope collision
                         float ladderPitchTarget = (targetPos.Z > botPos.Z) ? -60.0f : 60.0f;
                         float ladderSmoothedPitch = botAngles.X + NormalizeAngle(ladderPitchTarget - botAngles.X) * memory.CurrentAimSpeed;
                         
@@ -166,7 +163,6 @@ namespace ZeusBotAI
                         botPawn.Teleport(null, smoothedAnglesLadder, null);
                         
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Forward;
-                        
                         continue; 
                     }
 
@@ -186,9 +182,6 @@ namespace ZeusBotAI
 
                     bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
                     
-                    botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
-
-                    // --- AGGRESSION JUMPING ---
                     bool isClearingLadder = currentTime < memory.LadderClearTime;
                     
                     if (!isAirborne && currentTime > memory.JumpCooldown && distance < 800.0f && !isClearingLadder)
@@ -200,7 +193,6 @@ namespace ZeusBotAI
                         }
                     }
 
-                    // --- WALL-SLIDE EVASION ---
                     if (currentTime > memory.LastStuckCheckTime + 0.4f && !isClearingLadder)
                     {
                         float distMoved = (botPos - memory.LastPosition).Length();
@@ -214,7 +206,6 @@ namespace ZeusBotAI
                         memory.LastStuckCheckTime = currentTime;
                     }
 
-                    // --- PINCER FLANKING LOGIC ---
                     Vector pincerWrapDir = new Vector(0, 0, 0);
                     bool isPincering = false;
                     int pincerPartners = 0;
@@ -252,7 +243,6 @@ namespace ZeusBotAI
                         if (isPincering) pincerWrapDir = NormalizeVector(pincerWrapDir);
                     }
 
-                    // --- THREAT AWARENESS (Fear) ---
                     Vector targetForward = GetForwardVector(targetAngles);
                     Vector dirToBot = GetNormalizedVector(targetPos, botPos);
                     float playerAimDot = DotProduct(targetForward, dirToBot);
@@ -268,7 +258,6 @@ namespace ZeusBotAI
                     bool isEscaping = currentTime < memory.EscapeEndTime;
                     float driftFactor = (float)Math.Sin(currentTime * 3.5f + bot.Index) * 0.4f;
 
-                    // --- MASTER KINEMATIC BLENDER ---
                     if (isClearingLadder)
                     {
                         finalMoveDir = NormalizeVector(memory.LadderClearDir);
@@ -311,7 +300,6 @@ namespace ZeusBotAI
                     finalMoveDir = NormalizeVector(finalMoveDir);
                     Vector injectedVelocity = new Vector(finalMoveDir.X * moveSpeed, finalMoveDir.Y * moveSpeed, currentVel.Z);
 
-                    // --- PRO CROSSHAIR PLACEMENT ---
                     float deltaX = targetPos.X - botPos.X;
                     float deltaY = targetPos.Y - botPos.Y;
                     float deltaZ = (targetPos.Z + 50.0f) - (botPos.Z + 50.0f); 
@@ -331,16 +319,29 @@ namespace ZeusBotAI
                     var smoothedAngles = new QAngle(newPitch, newYaw, 0);
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- DYNAMIC TRIGGER CONE ---
+                    // --- NEW HARDWARE TRIGGER SIMULATION ---
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
                     float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
                     float allowedPitchDiff = 15.0f;
 
-                    if (currentTime >= memory.NextFireTime && distance <= 140.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    // If NextFireTime was recently set, hold the trigger down for exactly 0.15 seconds 
+                    bool isPullingTrigger = (currentTime < memory.NextFireTime - 0.25f);
+
+                    if (isPullingTrigger)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                        memory.NextFireTime = currentTime + 0.3f;
+                    }
+                    // Increased Zeus firing range check to 160.0f to account for Origin-to-Origin distances
+                    else if (currentTime >= memory.NextFireTime && distance <= 160.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    {
+                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                        // Set cooldown to 0.4 seconds. The first 0.15s is the held click, the next 0.25s is the clean release.
+                        memory.NextFireTime = currentTime + 0.4f; 
+                    }
+                    else
+                    {
+                        botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
                     }
                 }
             }
@@ -388,6 +389,17 @@ namespace ZeusBotAI
             if (weaponServices == null || weaponServices.MyWeapons == null) return;
 
             bool hasZeus = false;
+            bool isHoldingZeus = false;
+
+            // --- CHECK IF THEY ARE ACTIVELY HOLDING THE ZEUS ---
+            var activeWeapon = weaponServices.ActiveWeapon.Value;
+            if (activeWeapon != null && activeWeapon.IsValid && activeWeapon.DesignerName != null)
+            {
+                if (activeWeapon.DesignerName.Contains("taser"))
+                {
+                    isHoldingZeus = true;
+                }
+            }
 
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
@@ -409,6 +421,11 @@ namespace ZeusBotAI
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
+            }
+            else if (!isHoldingZeus)
+            {
+                // FORCE the bot AI to switch back to the Zeus if they pulled out a knife or grenade
+                bot.ExecuteClientCommand("use weapon_taser");
             }
 
             foreach (var weaponHandle in weaponServices.MyWeapons)
