@@ -55,13 +55,13 @@ namespace ZeusBotAI
         public GoapState Preconditions { get; } = new GoapState();
         public GoapState Effects { get; } = new GoapState();
 
-        // Check #2: Procedural Context Precondition (From Article Part I)
+        // Check #1: Procedural Context Precondition
         public virtual bool CheckContextPrecondition(BotAgent agent) => true;
 
-        // Check #3: Sanity Check right before execution
+        // Check #2: Sanity Check right before execution
         public virtual bool IsValid(BotAgent agent) => true;
 
-        // Check #4: Execution state / Animation checking
+        // Check #3: Execution state / Animation checking
         public abstract bool IsDone(BotAgent agent);
         public abstract void Execute(BotAgent agent, float deltaTime);
         public virtual void OnEnter(BotAgent agent) { }
@@ -156,7 +156,7 @@ namespace ZeusBotAI
 
         public void UpdateSensor(List<CCSPlayerController> allPlayers, float currentTime)
         {
-            if (Pawn == null) return;
+            if (Pawn == null || !Pawn.IsValid) return;
             Vector myPos = Pawn.AbsOrigin!;
             Vector myForward = MathUtils.GetForwardVector(Pawn.EyeAngles!);
 
@@ -164,7 +164,7 @@ namespace ZeusBotAI
             {
                 if (player == Controller || player.TeamNum == Controller.TeamNum || !player.PawnIsAlive) continue;
                 var enemyPawn = player.PlayerPawn.Value;
-                if (enemyPawn == null) continue;
+                if (enemyPawn == null || !enemyPawn.IsValid) continue;
 
                 Vector enemyPos = enemyPawn.AbsOrigin!;
                 float dist = (myPos - enemyPos).Length();
@@ -314,7 +314,7 @@ namespace ZeusBotAI
             Preconditions.Values[StateKey.TargetInKnifeRange] = true;
             Preconditions.Values[StateKey.WeaponEquipped] = true;
             Effects.Values[StateKey.TargetDead] = true;
-            Cost = 2f; // Slightly higher cost than Zeus, so Zeus is preferred if both are in range
+            Cost = 2f; 
         }
         
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
@@ -324,8 +324,8 @@ namespace ZeusBotAI
         
         public override void Execute(BotAgent agent, float dt)
         {
-            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); // Stop moving to secure the stab
-            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; // Right-click stab for maximum damage
+            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); 
+            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
         }
     }
 
@@ -337,7 +337,7 @@ namespace ZeusBotAI
             Preconditions.Values[StateKey.HasNade] = true;
             Preconditions.Values[StateKey.HasTarget] = true;
             Effects.Values[StateKey.TargetDead] = true;
-            Cost = 3f; // Highest cost, making it a situational fallback
+            Cost = 3f; 
         }
 
         public override bool IsDone(BotAgent agent) => agent.Blackboard.ActionCooldown > Server.CurrentTime || !HasWeapon(agent, "hegrenade");
@@ -351,7 +351,6 @@ namespace ZeusBotAI
 
             var activeWeapon = weaponServices.ActiveWeapon.Value;
             
-            // If the nade isn't in hands yet, equip it
             if (activeWeapon == null || !activeWeapon.DesignerName.Contains("hegrenade"))
             {
                 foreach (var weaponHandle in weaponServices.MyWeapons)
@@ -367,7 +366,6 @@ namespace ZeusBotAI
             }
             else
             {
-                // Nade is in hands, pull the pin
                 agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
             }
         }
@@ -375,6 +373,13 @@ namespace ZeusBotAI
         private bool HasWeapon(BotAgent agent, string name)
         {
             if (agent.Pawn?.WeaponServices?.MyWeapons == null) return false;
+            foreach (var w in agent.Pawn.WeaponServices.MyWeapons)
+            {
+                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
+            }
+            return false;
+        }
+    }
 
     public class GoalKillEnemy : GoapGoal
     {
@@ -388,7 +393,6 @@ namespace ZeusBotAI
         public override int GetPriority(BotAgent agent) => agent.Blackboard.FearTimer >= Server.CurrentTime ? 100 : 0;
     }
 
-    // ACTIONS
     public class ActionEvasiveRetreat : GoapAction
     {
         public ActionEvasiveRetreat()
@@ -401,14 +405,13 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent) => agent.Blackboard.FearTimer < Server.CurrentTime;
         public override void Execute(BotAgent agent, float dt)
         {
-            // Pro B-Hop Retreat Logic
             if (agent.Blackboard.CurrentTargetFact != null)
             {
                 Vector dirAway = MathUtils.NormalizeVector(agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition);
                 Vector strafe = new Vector(-dirAway.Y, dirAway.X, 0); // 90 degree dodge
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirAway + strafe);
                 agent.Blackboard.DesiredSpeed = 250f;
-                agent.Blackboard.ButtonsToPress |= (ulong)(PlayerButtons.Jump | PlayerButtons.Duck); // Tuck and jump
+                agent.Blackboard.ButtonsToPress |= (ulong)(PlayerButtons.Jump | PlayerButtons.Duck); 
             }
         }
     }
@@ -431,7 +434,6 @@ namespace ZeusBotAI
         {
             Vector targetPos = agent.Blackboard.CurrentTargetFact!.LastKnownPosition;
             Vector dir = MathUtils.NormalizeVector(targetPos - agent.Pawn.AbsOrigin!);
-            // Sweep strafing approach
             Vector strafe = new Vector(-dir.Y, dir.X, 0) * (float)Math.Sin(Server.CurrentTime * 3f);
             agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dir * 1.5f + strafe);
             agent.Blackboard.DesiredSpeed = 250f;
@@ -453,12 +455,10 @@ namespace ZeusBotAI
         public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.0f;
         public override void Execute(BotAgent agent, float dt)
         {
-            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); // Stop and shoot
-            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack; // Trigger pull
+            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); 
+            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack; 
         }
     }
-
-    // (Similar structures omitted for brevity for EquipZeus, EquipKnife, ThrowNade, EngageKnife, but they exist in the logic flow)
 
     #endregion
 
@@ -468,12 +468,9 @@ namespace ZeusBotAI
     {
         public Queue<GoapAction> Plan(BotAgent agent, GoapGoal goal, GoapState startState)
         {
-            // Simplified reverse-chaining A* planner based on Article I
             var usableActions = agent.AvailableActions.Where(a => a.CheckContextPrecondition(agent)).ToList();
             List<GoapAction> bestPlan = new List<GoapAction>();
             
-            // Due to limitations of single-file plugin depth, we map out direct forward chains for specific goals
-            // In a full commercial engine this uses a recursive graph search. We emulate it here functionally.
             if (goal is GoalSurvive)
             {
                 bestPlan.Add(usableActions.First(a => a is ActionEvasiveRetreat));
@@ -553,12 +550,10 @@ namespace ZeusBotAI
                     agents[bot.Index] = agent;
                 }
 
-                // AI MANAGER & SCHEDULER (Part II)
-                // Staggered sensor sweeps to save CPU
                 if (tickCounter % 10 == bot.Index % 10) 
                 {
                     agent.UpdateSensor(aliveEnemies, currentTime);
-                    agent.Memory.Update(dt * 10f); // Time adjustment for staggered ticks
+                    agent.Memory.Update(dt * 10f); 
                 }
 
                 ProcessAgentIntelligence(agent, currentTime, dt);
@@ -568,13 +563,11 @@ namespace ZeusBotAI
 
         private void ProcessAgentIntelligence(BotAgent agent, float currentTime, float dt)
         {
-            // Targeting System - Evaluate facts in Working Memory
             var facts = agent.Memory.Facts.Values.OrderByDescending(f => f.ThreatLevel * f.Confidence).ToList();
             agent.Blackboard.CurrentTargetFact = facts.FirstOrDefault();
-            agent.Blackboard.ButtonsToPress = 0; // Reset
+            agent.Blackboard.ButtonsToPress = 0; 
             agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0);
 
-            // Re-plan if plan is empty
             if (agent.CurrentPlan.Count == 0 && agent.CurrentAction == null)
             {
                 var topGoal = agent.Goals.OrderByDescending(g => g.GetPriority(agent)).First();
@@ -585,7 +578,6 @@ namespace ZeusBotAI
                 }
             }
 
-            // Execute Plan
             if (agent.CurrentAction == null && agent.CurrentPlan.Count > 0)
             {
                 agent.CurrentAction = agent.CurrentPlan.Dequeue();
@@ -605,7 +597,6 @@ namespace ZeusBotAI
                 }
             }
 
-            // Aim Logic Output
             if (agent.Blackboard.CurrentTargetFact != null)
             {
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
@@ -617,7 +608,6 @@ namespace ZeusBotAI
                 float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
                 
-                // Smooth Aim Injection
                 float currentYaw = agent.Pawn.EyeAngles!.Y;
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * 0.2f;
@@ -632,7 +622,6 @@ namespace ZeusBotAI
             var pawn = agent.Pawn;
             if (pawn?.MovementServices == null) return;
 
-            // Command application (Motor/Kinematics Layer)
             Vector dir = agent.Blackboard.DesiredMoveDirection;
             float speed = agent.Blackboard.DesiredSpeed;
             Vector currentVel = pawn.AbsVelocity!;
