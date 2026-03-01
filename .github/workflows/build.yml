@@ -21,36 +21,6 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Bump Version in CS File
-      id: bump
-      run: |
-        FILE=$(find . -name "ZeusBotAI*.cs" | head -n 1)
-        CURRENT_VERSION=$(grep -oP 'ModuleVersion\s*=>\s*"\K[0-9.]+' "$FILE")
-        echo "Current Version: $CURRENT_VERSION"
-        
-        IFS='.' read -r -a parts <<< "$CURRENT_VERSION"
-        
-        if [ ${#parts[@]} -eq 1 ]; then
-            NEW_VERSION="${parts[0]}.0.1"
-        elif [ ${#parts[@]} -eq 2 ]; then
-            NEW_VERSION="${parts[0]}.${parts[1]}.1"
-        else
-            parts[2]=$((parts[2] + 1))
-            NEW_VERSION="${parts[0]}.${parts[1]}.${parts[2]}"
-        fi
-        
-        echo "New Version: $NEW_VERSION"
-        sed -i "s/ModuleVersion\s*=>\s*\"$CURRENT_VERSION\"/ModuleVersion => \"$NEW_VERSION\"/" "$FILE"
-        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
-
-    - name: Commit and Push Version Bump
-      run: |
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        git config --local user.name "github-actions[bot]"
-        git add .
-        git commit -m "chore: bump version to ${{ env.NEW_VERSION }} [skip ci]"
-        git push
-
     - name: Setup .NET 8.0
       uses: actions/setup-dotnet@v4
       with:
@@ -99,15 +69,32 @@ jobs:
         
         # Navigate in, zip the folder, and move the zip back to the root workspace
         cd package
-        zip -r ../ZeusBotAI-${{ env.NEW_VERSION }}.zip counterstrikesharp/
+        zip -r ../ZeusBotAI-1.0.zip counterstrikesharp/
         cd ..
 
-    - name: Create GitHub Release
+    - name: Delete All Previous Releases and Tags
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # Upload the zip file instead of the raw dll
-        gh release create "v${{ env.NEW_VERSION }}" ZeusBotAI-${{ env.NEW_VERSION }}.zip \
-          --title "Zeus Bot AI v${{ env.NEW_VERSION }}" \
-          --notes "Automated release of Zeus Bot AI version ${{ env.NEW_VERSION }}." \
+        # Fetch all release tags and delete them along with their git tags
+        RELEASES=$(gh release list --limit 1000 | awk '{print $1}')
+        for release in $RELEASES; do
+          if [ -n "$release" ]; then
+            echo "Deleting release and tag: $release"
+            gh release delete "$release" -y --cleanup-tag || true
+          fi
+        done
+        
+        # Backup cleanup: Ensure the v1.0 tag is completely removed from origin 
+        # just in case it was lingering without an associated release.
+        git push --delete origin v1.0 || true
+
+    - name: Create GitHub Release v1.0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Upload the zip file as v1.0
+        gh release create "v1.0" ZeusBotAI-1.0.zip \
+          --title "Zeus Bot AI v1.0" \
+          --notes "Automated release of Zeus Bot AI version 1.0." \
           --latest
