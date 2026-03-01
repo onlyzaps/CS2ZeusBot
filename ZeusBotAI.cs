@@ -343,42 +343,49 @@ namespace ZeusBotAI
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
         {
             var weaponServices = botPawn.WeaponServices;
-            if (weaponServices == null) return;
+            if (weaponServices == null || weaponServices.MyWeapons == null) return;
 
             bool hasZeus = false;
-            uint taserHandleRaw = 0;
 
-            if (weaponServices.MyWeapons != null)
+            // First pass: Check for Zeus and refill ammo if needed
+            foreach (var weaponHandle in weaponServices.MyWeapons)
             {
-                foreach (var weaponHandle in weaponServices.MyWeapons)
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.IsValid && weapon.DesignerName != null)
                 {
-                    var weapon = weaponHandle.Value;
-                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                    if (weapon.DesignerName.Contains("taser"))
                     {
                         hasZeus = true;
-                        taserHandleRaw = weaponHandle.Raw;
                         
+                        // Keep the Zeus fully loaded so the engine doesn't try to drop it
                         if (weapon.Clip1 <= 0)
                         {
                             weapon.Clip1 = 1;
                             Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_iClip1");
                         }
-                        break;
                     }
                 }
             }
 
+            // If they don't have a Zeus, give them one
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
             }
-            else
+
+            // Second pass: Strip EVERYTHING that is not the Zeus
+            // By doing this, the engine natively forces the Zeus to deploy, 
+            // completely fixing the invisible weapon / ghost hands bug.
+            foreach (var weaponHandle in weaponServices.MyWeapons)
             {
-                var activeWeapon = weaponServices.ActiveWeapon.Value;
-                if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.IsValid && weapon.DesignerName != null)
                 {
-                    weaponServices.ActiveWeapon.Raw = taserHandleRaw;
-                    Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                    if (!weapon.DesignerName.Contains("taser") && !weapon.DesignerName.Contains("c4"))
+                    {
+                        // Remove knives, pistols, rifles, etc.
+                        weapon.Remove(); 
+                    }
                 }
             }
         }
