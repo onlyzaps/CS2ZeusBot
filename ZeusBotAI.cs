@@ -27,12 +27,15 @@ namespace ZeusBotAI
         public bool WasOnLadder { get; set; } = false;
         public float LadderClearTime { get; set; } = 0f;
         public Vector LadderClearDir { get; set; } = new Vector(0, 0, 0);
+
+        // --- NEW: Cooldown for forcing weapon equips ---
+        public float LastWeaponCycleTime { get; set; } = 0f;
     }
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Active Trigger Fix)";
-        public override string ModuleVersion => "16.2.1";
+        public override string ModuleName => "Zeus Bot AI (Smart Equip & Utility)";
+        public override string ModuleVersion => "16.3.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -43,7 +46,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v16.2 Active Trigger Fix loaded.");
+            Console.WriteLine("[Zeus Bot AI] v16.3 Smart Equip & Utility loaded.");
         }
 
         private void ProcessBotBrains()
@@ -70,16 +73,25 @@ namespace ZeusBotAI
                 }
 
                 var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
+                float distToTarget = float.MaxValue;
                 
                 if (target == null) 
                 {
                     memory.CurrentTarget = null;
                 }
-                else if (memory.CurrentTarget != target)
+                else 
                 {
-                    memory.CurrentTarget = target;
-                    memory.TargetAcquiredTime = currentTime;
-                    memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.14f; 
+                    if (memory.CurrentTarget != target)
+                    {
+                        memory.CurrentTarget = target;
+                        memory.TargetAcquiredTime = currentTime;
+                        memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.14f; 
+                    }
+
+                    if (target.PlayerPawn.Value?.AbsOrigin != null && botPawn.AbsOrigin != null)
+                    {
+                        distToTarget = (botPawn.AbsOrigin - target.PlayerPawn.Value.AbsOrigin).Length();
+                    }
                 }
 
                 if (currentTime > memory.NextStrafeSwitch)
@@ -112,7 +124,8 @@ namespace ZeusBotAI
                 }
                 memory.RepulsionForce = totalRepulsion;
 
-                EnsureBotHasAndHoldsZeus(bot, botPawn);
+                // Execute the new cycling strategy
+                EnsureBotHasAndHoldsZeus(bot, botPawn, memory, target != null, distToTarget);
             }
         }
 
@@ -131,6 +144,14 @@ namespace ZeusBotAI
                 
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn?.MovementServices == null || botPawn.AbsVelocity == null) continue;
+
+                // Determine what the bot is actually holding right now
+                bool isHoldingZeus = false;
+                var activeWeapon = botPawn.WeaponServices?.ActiveWeapon.Value;
+                if (activeWeapon != null && activeWeapon.IsValid && activeWeapon.DesignerName != null)
+                {
+                    if (activeWeapon.DesignerName.Contains("taser")) isHoldingZeus = true;
+                }
 
                 if (memory.CurrentTarget != null && memory.CurrentTarget.IsValid && memory.CurrentTarget.PawnIsAlive)
                 {
@@ -319,30 +340,31 @@ namespace ZeusBotAI
                     var smoothedAngles = new QAngle(newPitch, newYaw, 0);
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- NEW HARDWARE TRIGGER SIMULATION ---
-                    float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
-                    float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
-                    float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
-                    float allowedPitchDiff = 15.0f;
-
-                    // If NextFireTime was recently set, hold the trigger down for exactly 0.15 seconds 
-                    bool isPullingTrigger = (currentTime < memory.NextFireTime - 0.25f);
-
-                    if (isPullingTrigger)
+                    // --- ONLY APPLY TRIGGER INJECTION IF HOLDING TASER ---
+                    if (isHoldingZeus)
                     {
-                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                    }
-                    // Increased Zeus firing range check to 160.0f to account for Origin-to-Origin distances
-                    else if (currentTime >= memory.NextFireTime && distance <= 160.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
-                    {
-                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                        // Set cooldown to 0.4 seconds. The first 0.15s is the held click, the next 0.25s is the clean release.
-                        memory.NextFireTime = currentTime + 0.4f; 
-                    }
-                    else
-                    {
+                        // Clear native attack hold to prepare for our hardware trigger simulation
                         botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
+
+                        float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
+                        float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
+                        float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
+                        float allowedPitchDiff = 15.0f;
+
+                        bool isPullingTrigger = (currentTime < memory.NextFireTime - 0.25f);
+
+                        if (isPullingTrigger)
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                        }
+                        else if (currentTime >= memory.NextFireTime && distance <= 160.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                            memory.NextFireTime = currentTime + 0.4f; 
+                        }
                     }
+                    // If they are holding a grenade or knife, we DO NOT interfere with the attack button!
+                    // Let the native CS2 AI decide when to throw or swing.
                 }
             }
         }
@@ -383,23 +405,27 @@ namespace ZeusBotAI
             return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
-        private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
+        private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn, CombatState memory, bool hasTarget, float distanceToTarget)
         {
             var weaponServices = botPawn.WeaponServices;
             if (weaponServices == null || weaponServices.MyWeapons == null) return;
 
             bool hasZeus = false;
             bool isHoldingZeus = false;
+            bool isHoldingUtility = false;
 
-            // --- CHECK IF THEY ARE ACTIVELY HOLDING THE ZEUS ---
             var activeWeapon = weaponServices.ActiveWeapon.Value;
             if (activeWeapon != null && activeWeapon.IsValid && activeWeapon.DesignerName != null)
             {
-                if (activeWeapon.DesignerName.Contains("taser"))
+                string aName = activeWeapon.DesignerName;
+                if (aName.Contains("taser")) isHoldingZeus = true;
+                if (aName.Contains("grenade") || aName.Contains("molotov") || aName.Contains("flashbang") || aName.Contains("decoy") || aName.Contains("smoke")) 
                 {
-                    isHoldingZeus = true;
+                    isHoldingUtility = true;
                 }
             }
+
+            CBasePlayerWeapon? heldTaser = null;
 
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
@@ -409,6 +435,7 @@ namespace ZeusBotAI
                     if (weapon.DesignerName.Contains("taser"))
                     {
                         hasZeus = true;
+                        heldTaser = weapon;
                         if (weapon.Clip1 <= 0)
                         {
                             weapon.Clip1 = 1;
@@ -418,16 +445,27 @@ namespace ZeusBotAI
                 }
             }
 
+            // Force equip logic via item cycling
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
             }
-            else if (!isHoldingZeus)
+            else if (hasTarget && !isHoldingZeus && !isHoldingUtility && distanceToTarget < 800.0f)
             {
-                // FORCE the bot AI to switch back to the Zeus if they pulled out a knife or grenade
-                bot.ExecuteClientCommand("use weapon_taser");
+                // If they have a knife out and are approaching an enemy, force cycle the taser!
+                // We use a 2-second cooldown to prevent infinite visual equip loops
+                if (Server.CurrentTime > memory.LastWeaponCycleTime + 2.0f)
+                {
+                    if (heldTaser != null && heldTaser.IsValid)
+                    {
+                        heldTaser.Remove();
+                    }
+                    bot.GiveNamedItem("weapon_taser");
+                    memory.LastWeaponCycleTime = Server.CurrentTime;
+                }
             }
 
+            // Strip out unallowed gear
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -442,7 +480,8 @@ namespace ZeusBotAI
                         !wName.Contains("grenade") && 
                         !wName.Contains("flashbang") && 
                         !wName.Contains("molotov") && 
-                        !wName.Contains("decoy"))
+                        !wName.Contains("decoy") &&
+                        !wName.Contains("smoke"))
                     {
                         weapon.Remove(); 
                     }
