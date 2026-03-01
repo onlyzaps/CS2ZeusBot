@@ -119,6 +119,7 @@ namespace ZeusBotAI
         public float FearTimer = 0f;
         public float ActionCooldown = 0f;
         public float SpawnTime = 0f;
+        public bool IsAirDodging = false;
         public List<Vector> NearbyAllies = new List<Vector>();
     }
 
@@ -163,6 +164,7 @@ namespace ZeusBotAI
             Vector myForward = MathUtils.GetForwardVector(Pawn.EyeAngles!);
             
             Blackboard.NearbyAllies.Clear();
+            Blackboard.IsAirDodging = false;
 
             foreach (var player in allPlayers)
             {
@@ -199,7 +201,23 @@ namespace ZeusBotAI
                     float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
                     fact.ThreatLevel = (1500f - dist) * 2f; // Distance is a huge factor
                     
-                    if (enemyAimDot > 0.9f) fact.ThreatLevel += 3000f; // Aimed at!
+                    bool enemyHasZeus = false;
+                    var activeWep = otherPawn.WeaponServices?.ActiveWeapon.Value;
+                    if (activeWep != null && activeWep.DesignerName != null && activeWep.DesignerName.Contains("taser"))
+                    {
+                        enemyHasZeus = true;
+                    }
+                    
+                    if (enemyAimDot > 0.9f) 
+                    {
+                        fact.ThreatLevel += 3000f; // Aimed at!
+                        
+                        // If enemy has a Zeus and is dangerously close while aiming, start air dodging
+                        if (enemyHasZeus && dist < 450f)
+                        {
+                            Blackboard.IsAirDodging = true;
+                        }
+                    }
                     if (dist < 300f) fact.ThreatLevel += 5000f; // Immediate combat priority
                     
                     // Trigger Interruption / Fear State if heavily threatened from afar
@@ -683,7 +701,7 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.3";
+        public override string ModuleVersion => "2.0.4";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
@@ -725,17 +743,24 @@ namespace ZeusBotAI
                 }
                 
                 // Assign a unique name if not already renamed from this pool
-                if (!botNames.Contains(player.PlayerName))
+                // Delay to prevent CS2 spawn logic from immediately overwriting
+                AddTimer(0.1f, () =>
                 {
-                    if (availableNames.Count == 0) availableNames = new List<string>(botNames); // Refill if empty
-                    
-                    int randIdx = new Random().Next(availableNames.Count);
-                    string chosenName = availableNames[randIdx];
-                    availableNames.RemoveAt(randIdx);
-                    
-                    player.PlayerName = chosenName;
-                    Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
-                }
+                    if (player.IsValid)
+                    {
+                        if (!botNames.Contains(player.PlayerName))
+                        {
+                            if (availableNames.Count == 0) availableNames = new List<string>(botNames); // Refill if empty
+                            
+                            int randIdx = new Random().Next(availableNames.Count);
+                            string chosenName = availableNames[randIdx];
+                            availableNames.RemoveAt(randIdx);
+                            
+                            player.PlayerName = chosenName;
+                            Utilities.SetStateChanged(player, "CBasePlayerController", "m_iszPlayerName");
+                        }
+                    }
+                });
             }
             return HookResult.Continue;
         }
@@ -805,6 +830,23 @@ namespace ZeusBotAI
                 }
             }
             
+            // Intense Air Dodge Override
+            if (agent.Blackboard.IsAirDodging)
+            {
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                
+                // Extremely unpredictable rapid strafing in mid-air
+                float dodgeSine = (float)Math.Sin(Server.CurrentTime * 35f + agent.Controller.Index);
+                Vector forward = agent.Blackboard.DesiredMoveDirection;
+                if (forward.Length() == 0) forward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
+                
+                Vector strafe = new Vector(-forward.Y, forward.X, 0) * Math.Sign(dodgeSine);
+                
+                // Boost speed and sharply cut left/right
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((forward * 0.1f) + strafe);
+                agent.Blackboard.DesiredSpeed = 350f; 
+            }
+
             // "Spawn Excitement" / Roll-Out Embellishment
             if (currentTime - agent.Blackboard.SpawnTime < 10.0f && agent.CurrentAction is not ActionEngageZeus)
             {
