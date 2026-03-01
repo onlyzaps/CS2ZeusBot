@@ -263,7 +263,7 @@ namespace ZeusBotAI
             if (Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in Pawn.WeaponServices.MyWeapons)
             {
-                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
+                if (w.Value != null && w.Value.DesignerName != null && w.Value.DesignerName.Contains(name)) return true;
             }
             return false;
         }
@@ -285,7 +285,7 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-            return activeWeapon != null && activeWeapon.DesignerName.Contains("taser");
+            return activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("taser");
         }
 
         public override void Execute(BotAgent agent, float dt)
@@ -319,7 +319,7 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-            return activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
+            return activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("knife");
         }
 
         public override void Execute(BotAgent agent, float dt)
@@ -386,7 +386,7 @@ namespace ZeusBotAI
 
             var activeWeapon = weaponServices.ActiveWeapon.Value;
             
-            if (activeWeapon == null || !activeWeapon.DesignerName.Contains("hegrenade"))
+            if (activeWeapon == null || activeWeapon.DesignerName == null || !activeWeapon.DesignerName.Contains("hegrenade"))
             {
                 foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
@@ -411,7 +411,7 @@ namespace ZeusBotAI
             if (agent.Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in agent.Pawn.WeaponServices.MyWeapons)
             {
-                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
+                if (w.Value != null && w.Value.DesignerName != null && w.Value.DesignerName.Contains(name)) return true;
             }
             return false;
         }
@@ -460,8 +460,11 @@ namespace ZeusBotAI
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 0.5f) + strafe + separation);
                 agent.Blackboard.DesiredSpeed = 250f;
                 
-                // Advanced duck/jump matrix based on frame times
-                if (dodgeSine > 0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                // Advanced duck/jump matrix based on frame times - pulse jumps so they actually trigger
+                if (dodgeSine > 0.8f) 
+                {
+                    if ((int)(Server.CurrentTime * 15f) % 2 == 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                }
                 else if (dodgeSine < -0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
         }
@@ -513,8 +516,8 @@ namespace ZeusBotAI
             float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 1.5f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
             if (dist < 500f && dist > 200f && randomJumpChance > 0.8f) 
             {
-                // Bhop spacing
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                // Bhop spacing - pulse jump so it registers correctly in the engine
+                if ((int)(Server.CurrentTime * 15f) % 2 == 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
             }
             else if (dist < 300f && Math.Abs(dodgeSine) > 0.9f) 
             {
@@ -624,7 +627,10 @@ namespace ZeusBotAI
                 
                 // Ensure they explicitly equip the best weapon before trying to use it
                 var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-                if (activeWeapon == null || (!activeWeapon.DesignerName.Contains("taser") && !activeWeapon.DesignerName.Contains("knife")))
+                bool holdingTaser = activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("taser");
+                bool holdingKnife = activeWeapon != null && activeWeapon.DesignerName != null && activeWeapon.DesignerName.Contains("knife");
+
+                if (!holdingTaser && !holdingKnife)
                 {
                     if (hasZeus)
                     {
@@ -639,7 +645,7 @@ namespace ZeusBotAI
                 }
                 
                 // Because Zeus regenerates so fast, don't fallback to knife if we HAVE a zeus. Always try to approach for Zeus.
-                if (hasZeus && activeWeapon != null && activeWeapon.DesignerName.Contains("knife"))
+                if (hasZeus && holdingKnife)
                 {
                      var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
                      if (equipAction != null) bestPlan.Add(equipAction);
@@ -823,6 +829,29 @@ namespace ZeusBotAI
             if (agent.CurrentAction != null)
             {
                 agent.CurrentAction.Execute(agent, dt);
+                
+                // Aggressively force Zeus override if native bot AI swapped to a knife during approach/engage
+                if (agent.CurrentAction is ActionApproachTarget || agent.CurrentAction is ActionEngageZeus)
+                {
+                    bool hasZ = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
+                    if (hasZ)
+                    {
+                        var activeWep = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+                        if (activeWep != null && activeWep.DesignerName != null && activeWep.DesignerName.Contains("knife"))
+                        {
+                            foreach (var wHandle in agent.Pawn!.WeaponServices!.MyWeapons)
+                            {
+                                if (wHandle.Value != null && wHandle.Value.DesignerName != null && wHandle.Value.DesignerName.Contains("taser"))
+                                {
+                                    agent.Pawn.WeaponServices.ActiveWeapon.Raw = wHandle.Raw;
+                                    Utilities.SetStateChanged(agent.Pawn, "CBasePlayerPawn", "m_pWeaponServices");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (agent.CurrentAction.IsDone(agent))
                 {
                     agent.CurrentAction.OnExit(agent);
@@ -833,7 +862,11 @@ namespace ZeusBotAI
             // Intense Air Dodge Override
             if (agent.Blackboard.IsAirDodging)
             {
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                agent.Blackboard.ButtonsToPress &= ~(ulong)PlayerButtons.Duck; // Prevent ducking cancelling out the jump
+                if ((int)(Server.CurrentTime * 15f) % 2 == 0) // Pulse jump 
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                }
                 
                 // Extremely unpredictable rapid strafing in mid-air
                 float dodgeSine = (float)Math.Sin(Server.CurrentTime * 35f + agent.Controller.Index);
