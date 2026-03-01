@@ -658,8 +658,12 @@ namespace ZeusBotAI
     {
         public static float NormalizeAngle(float angle)
         {
-            while (angle > 180) angle -= 360;
-            while (angle < -180) angle += 360;
+            if (float.IsNaN(angle) || float.IsInfinity(angle)) return 0f;
+            
+            angle %= 360f;
+            if (angle > 180f) angle -= 360f;
+            else if (angle < -180f) angle += 360f;
+            
             return angle;
         }
 
