@@ -400,6 +400,9 @@ namespace ZeusBotAI
             // By NOT setting a DesiredSpeed, the InjectMotorCommands function will skip physics overrides,
             // allowing the bot to freely navigate navmesh/nodes until they spot a threat!
             agent.Blackboard.DesiredSpeed = 0f;
+            
+            // Also zero out DesiredMoveDirection so the aim lerp math below knows we are passive
+            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0);
         }
     }
 
@@ -487,10 +490,10 @@ namespace ZeusBotAI
             }
             else 
             {
-                // Jitter Sprint
-                float jitter = (float)Math.Sin(currentTime * 12f + agent.Controller.Index);
-                if (Math.Abs(jitter) > 0.8f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
-                mvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
+                // Jitter Sprint (Smoothed out)
+                float jitter = (float)Math.Sin(currentTime * 4f + agent.Controller.Index);
+                if (Math.Abs(jitter) > 0.6f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
+                mvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.25f));
             }
 
             agent.Blackboard.DesiredMoveDirection = mvmt;
@@ -525,8 +528,8 @@ namespace ZeusBotAI
                     agent.Blackboard.JumpCooldown = Server.CurrentTime + 0.5f;
                 }
                 
-                float erratic = (float)Math.Sin(Server.CurrentTime * 15f);
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 1.5f) + (right * Math.Sign(erratic)));
+                float erratic = (float)Math.Sin(Server.CurrentTime * 6f);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 1.5f) + (right * Math.Sign(erratic) * 0.5f));
                 agent.Blackboard.DesiredSpeed = 260f;
             }
         }
@@ -575,9 +578,9 @@ namespace ZeusBotAI
 
             if (agent.Blackboard.MovePattern == 0)
             {
-                // Hard ADAD peek
-                float strafeVal = Math.Sign(Math.Sin(time * 20f));
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.1f) + (rightDir * strafeVal));
+                // Wider, slower ADAD peek
+                float strafeVal = Math.Sign(Math.Sin(time * 5f));
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.25f) + (rightDir * strafeVal));
                 if (strafeVal > 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
             else
@@ -901,7 +904,7 @@ namespace ZeusBotAI
             }
 
             // Aim alignment
-            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.DesiredMoveDirection.Length() > 0)
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.DesiredMoveDirection.Length() > 0 && agent.Blackboard.DesiredSpeed > 0f)
             {
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector botPos = agent.Pawn.AbsOrigin!;
