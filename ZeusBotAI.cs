@@ -329,7 +329,7 @@ namespace ZeusBotAI
                     }
                 }
             }
-            if (agent.Blackboard.CurrentTargetFact != null)
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f)
             {
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
                 agent.Blackboard.DesiredSpeed = 250f;
@@ -366,7 +366,7 @@ namespace ZeusBotAI
                     }
                 }
             }
-            if (agent.Blackboard.CurrentTargetFact != null)
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f)
             {
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
                 agent.Blackboard.DesiredSpeed = 250f;
@@ -396,29 +396,10 @@ namespace ZeusBotAI
 
         public override void Execute(BotAgent agent, float dt)
         {
-            Vector targetPos = agent.Blackboard.CurrentTargetFact!.LastKnownPosition;
-            Vector myPos = agent.Pawn.AbsOrigin!;
-            Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-            
-            // Standard smooth running
-            agent.Blackboard.DesiredMoveDirection = dirToTarget;
-            agent.Blackboard.DesiredSpeed = 250f;
-
-            // Simple Auto-Jump for curbs/boxes
-            if (agent.Pawn.AbsVelocity != null && agent.Pawn.AbsVelocity.Length() < 50f && Server.CurrentTime > agent.Blackboard.JumpCooldown)
-            {
-                agent.Blackboard.StuckTicks++;
-                if (agent.Blackboard.StuckTicks > 15) // Stuck for about 0.25 seconds
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                    agent.Blackboard.JumpCooldown = Server.CurrentTime + 1.0f;
-                    agent.Blackboard.StuckTicks = 0;
-                }
-            }
-            else if (agent.Pawn.AbsVelocity != null && agent.Pawn.AbsVelocity.Length() > 100f)
-            {
-                agent.Blackboard.StuckTicks = 0;
-            }
+            // Fully hand off to CS2 native bot AI for map navigation.
+            // By NOT setting a DesiredSpeed, the InjectMotorCommands function will skip physics overrides,
+            // allowing the bot to freely navigate navmesh/nodes until they spot a threat!
+            agent.Blackboard.DesiredSpeed = 0f;
         }
     }
 
@@ -949,34 +930,28 @@ namespace ZeusBotAI
             var pawn = agent.Pawn;
             if (pawn?.MovementServices == null || !pawn.IsValid) return;
 
-            QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
+            // If the custom AI doesn't explicitly request speed (i.e. normal map traversal), 
+            // we hand complete control back to the Base CS2 Bot AI so they don't stare at walls!
+            if (agent.Blackboard.DesiredSpeed <= 0f) return;
+
+            QAngle outAngles = agent.Blackboard.DesiredAim;
 
             Vector currentVel = pawn.AbsVelocity ?? new Vector(0,0,0);
             Vector injectedVelocity = new Vector(currentVel.X, currentVel.Y, currentVel.Z);
 
-            if (agent.Blackboard.DesiredSpeed > 0f && agent.Blackboard.DesiredMoveDirection.Length() > 0)
+            injectedVelocity.X = agent.Blackboard.DesiredMoveDirection.X * agent.Blackboard.DesiredSpeed;
+            injectedVelocity.Y = agent.Blackboard.DesiredMoveDirection.Y * agent.Blackboard.DesiredSpeed;
+            
+            // Maintain grounded state seamlessly
+            bool isGrounded = ((uint)pawn.Flags & 1) != 0;
+            if (isGrounded)
             {
-                injectedVelocity.X = agent.Blackboard.DesiredMoveDirection.X * agent.Blackboard.DesiredSpeed;
-                injectedVelocity.Y = agent.Blackboard.DesiredMoveDirection.Y * agent.Blackboard.DesiredSpeed;
-                
-                // Maintain grounded state seamlessly
-                bool isGrounded = ((uint)pawn.Flags & 1) != 0;
-                if (isGrounded)
-                {
-                    injectedVelocity.Z = -15f; 
-                }
-            }
-            else
-            {
-                // Force dead stop if no speed desired so native AI doesn't walk backwards
-                injectedVelocity.X = 0f;
-                injectedVelocity.Y = 0f;
+                injectedVelocity.Z = -15f; 
             }
 
             // Execute Vertical Jump
             if ((agent.Blackboard.ButtonsToPress & (ulong)PlayerButtons.Jump) != 0)
             {
-                bool isGrounded = ((uint)pawn.Flags & 1) != 0;
                 bool safeToJump = true;
                 if (agent.Blackboard.CurrentTargetFact != null)
                 {
@@ -998,7 +973,7 @@ namespace ZeusBotAI
             // Submit buttons to engine (Crucial for Shooting / Ducking)
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
 
-            // Teleport rigidly to block backward drifting, applying custom forces
+            // Teleport rigidly applying custom combat forces
             pawn.Teleport(null, outAngles, injectedVelocity);
         }
 
