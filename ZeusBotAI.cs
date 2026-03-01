@@ -484,15 +484,22 @@ namespace ZeusBotAI
                     separation += MathUtils.NormalizeVector(repulse) * 1.5f;
             }
 
-            // Flanking arc logic: the closer we get, the more we strafe rather than approach straight
-            float forwardWeight = (dist < 300f) ? 0.7f : 1.5f;
+            // High pressure movement: they barrel forward but their path wiggles side to side
+            float forwardWeight = (dist < 400f) ? 0.9f : 1.2f;
 
             agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * forwardWeight) + strafe + separation);
             agent.Blackboard.DesiredSpeed = 250f;
             
-            if (dist < 250f && Math.Abs(dodgeSine) > 0.9f) 
+            // Unpredictable movement execution: add bunny hops, wide crouches, and jiggles
+            float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 1.5f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
+            if (dist < 500f && dist > 200f && randomJumpChance > 0.8f) 
             {
-                // Quick dips when getting close to throw off headshots
+                // Bhop spacing
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+            }
+            else if (dist < 300f && Math.Abs(dodgeSine) > 0.9f) 
+            {
+                // High level crouch-peeking / dodging
                 agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
         }
@@ -513,24 +520,53 @@ namespace ZeusBotAI
         public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
         
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
-        public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime || Server.CurrentTime > attemptGiveUpTime;
+        
+        // Remove the 2-second timeout give up since Zeus recharges fast, and let them keep trying until target dies or leaves range
+        public override bool IsDone(BotAgent agent) 
+        {
+            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            if (agent.Blackboard.ActionCooldown > Server.CurrentTime) return true; // Just fired, done for now to let planner loop
+
+            float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+            return dist > 210f; // Target escaped Zeus range, abort engagement
+        }
         
         public override void OnEnter(BotAgent agent) 
         {
-            attemptGiveUpTime = Server.CurrentTime + 2.0f; // Give it 2 seconds max to line up the perfect shot
+            // Removed give up time initialization
         }
         
         public override void Execute(BotAgent agent, float dt)
         {
             if (agent.Blackboard.CurrentTargetFact != null)
             {
-                // Unpredictable firing strafe
-                agent.Blackboard.DesiredSpeed = 100f; // Minimal speed to maintain accuracy but stay moving
+                // Level 9 Faceit movement: very erratic, ADAD spam, mixed with fast forward pushing
+                agent.Blackboard.DesiredSpeed = 250f; // Max velocity for strafing
                 Vector dirToTarget = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
-                float strafeVal = agent.Controller.Index % 2 == 0 ? 1f : -1f;
-                agent.Blackboard.DesiredMoveDirection = new Vector(-dirToTarget.Y, dirToTarget.X, 0) * strafeVal;
+                float distToTarget = (agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!).Length();
+
+                // Generate extremely erratic ADAD strafe intervals 
+                // Uses a highly volatile sine wave combination specifically scaled to frame time
+                float erraticSine = (float)(Math.Sin(Server.CurrentTime * 14f + agent.Controller.Index) + Math.Sin(Server.CurrentTime * 23f));
+                float strafeVal = Math.Sign(erraticSine); // Hard left or hard right, no in-between
+
+                // Occasional ducking when perfectly in range to dodge pre-fired headshots
+                if (distToTarget < 160f && erraticSine > 1.5f)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                }
+
+                // If perfectly in range, mix aggressive wide strafing with slight forward pressure. If slightly far, push forward while wiggle-strafing.
+                if (distToTarget < 170f) 
+                {
+                    agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.2f) + (new Vector(-dirToTarget.Y, dirToTarget.X, 0) * strafeVal));
+                }
+                else
+                {
+                    agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToTarget + (new Vector(-dirToTarget.Y, dirToTarget.X, 0) * (strafeVal * 0.4f)));
+                }
                 
-                // Extremely proficient aim check before firing. Ensure crosshair is almost perfectly aligned
+                // Track aim precisely (upper chest center mass)
                 Vector botHead = new Vector(agent.Pawn.AbsOrigin!.X, agent.Pawn.AbsOrigin!.Y, agent.Pawn.AbsOrigin!.Z + 64f);
                 Vector enemyChest = new Vector(agent.Blackboard.CurrentTargetFact.LastKnownPosition.X, agent.Blackboard.CurrentTargetFact.LastKnownPosition.Y, agent.Blackboard.CurrentTargetFact.LastKnownPosition.Z + 40f);
                 Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
@@ -539,12 +575,12 @@ namespace ZeusBotAI
                 float aimDot = MathUtils.DotProduct(currentForward, exactDir);
                 float dist = (botHead - enemyChest).Length();
                 
-                // Loosen dot product. 0.99f was way too tight and caused it to hold shots infinitely.
-                if (aimDot > 0.96f || (dist < 150f && aimDot > 0.85f)) 
+                // Allow them to "flick". If they aren't dead-on, they don't fire. 
+                // 0.985f is highly lethal but accounts for the heavy ADAD spam they are now doing
+                if (aimDot > 0.985f || (dist < 130f && aimDot > 0.92f)) 
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
-                    // Cooldown triggered specifically AFTER firing, letting the action finish and exit
-                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.2f; 
+                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.0f; 
                 }
             }
         }
@@ -584,9 +620,18 @@ namespace ZeusBotAI
                         if (equipKnife != null) bestPlan.Add(equipKnife);
                     }
                 }
+                
+                // Because Zeus regenerates so fast, don't fallback to knife if we HAVE a zeus. Always try to approach for Zeus.
+                if (hasZeus && activeWeapon != null && activeWeapon.DesignerName.Contains("knife"))
+                {
+                     var equipAction = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
+                     if (equipAction != null) bestPlan.Add(equipAction);
+                }
 
                 // Push approach phase
-                if (!startState.Values.GetValueOrDefault(StateKey.TargetInZeusRange, false))
+                if (!startState.Values.GetValueOrDefault(StateKey.TargetInZeusRange, false) && hasZeus)
+                    bestPlan.Add(usableActions.First(a => a is ActionApproachTarget));
+                else if (!startState.Values.GetValueOrDefault(StateKey.TargetInKnifeRange, false) && !hasZeus)
                     bestPlan.Add(usableActions.First(a => a is ActionApproachTarget));
                 
                 // Push engagement phase
@@ -721,13 +766,12 @@ namespace ZeusBotAI
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector botPos = agent.Pawn.AbsOrigin!;
                 
-                // Advanced target prediction - aim slightly ahead of velocity
-                // (Assuming we had velocity, we just aim center mass for now)
+                // Human-like prediction aim: pull towards center mass but anticipate movement
                 float dist = (targetPos - botPos).Length();
                 
                 float dx = targetPos.X - botPos.X;
                 float dy = targetPos.Y - botPos.Y;
-                float dz = (targetPos.Z + 40f) - (botPos.Z + 45f); // Aim lower torso for perfect zeus connects
+                float dz = (targetPos.Z + 40f) - (botPos.Z + 64f); // Account for bot head height to player chest
 
                 float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
@@ -735,10 +779,10 @@ namespace ZeusBotAI
                 float currentYaw = agent.Pawn.EyeAngles!.Y;
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 
-                // Dynamic aim snapping - if very close or engaging, snap harder
-                float aimLerp = 0.2f;
-                if (dist < 300f || agent.CurrentAction is ActionEngageZeus) aimLerp = 0.8f; // Extremely proficient close range aim
-                if (agent.Blackboard.CurrentTargetFact.ThreatLevel > 2000f) aimLerp = 0.6f; // Snap to high threats
+                // Very fast "flicky" aim lerp. Fast enough to track wild ADAD, but smooth enough to not look like a blatant spinbot
+                float aimLerp = 0.35f; 
+                if (dist < 250f || agent.CurrentAction is ActionEngageZeus) aimLerp = 0.65f; // Hard track during engagement
+                if (agent.Blackboard.CurrentTargetFact.ThreatLevel > 2000f) aimLerp = 0.5f; 
                 
                 float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * aimLerp;
                 float newPitch = Math.Clamp(currentPitch + MathUtils.NormalizeAngle(perfectPitch - currentPitch) * aimLerp, -89f, 89f);
