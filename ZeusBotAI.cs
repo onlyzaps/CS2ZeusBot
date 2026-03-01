@@ -44,7 +44,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v17.0 Classic Weapon Logic & Advanced Movement loaded.");
+            Console.WriteLine("[Zeus Bot AI] v17.0.2 Classic Weapon Logic & Advanced Movement loaded.");
         }
 
         private void ProcessBotBrains()
@@ -122,7 +122,7 @@ namespace ZeusBotAI
                 }
                 memory.RepulsionForce = totalRepulsion;
 
-                // Ported weapon logic from WorkingBackup3
+                // Call the updated weapon logic
                 EnsureBotHasAndHoldsZeus(bot, botPawn, target != null, distToTarget);
             }
         }
@@ -324,7 +324,16 @@ namespace ZeusBotAI
                     }
                     
                     finalMoveDir = NormalizeVector(finalMoveDir);
-                    Vector injectedVelocity = new Vector(finalMoveDir.X * moveSpeed, finalMoveDir.Y * moveSpeed, currentVel.Z);
+
+                    // --- RAMP-LAUNCH FIX ---
+                    float zVelocity = currentVel.Z;
+                    if (!isAirborne && zVelocity > 0) 
+                    {
+                        // Nullify positive Z velocity when grounded to prevent physics feedback loops
+                        zVelocity = 0; 
+                    }
+
+                    Vector injectedVelocity = new Vector(finalMoveDir.X * moveSpeed, finalMoveDir.Y * moveSpeed, zVelocity);
 
                     // --- PRO CROSSHAIR PLACEMENT ---
                     float deltaX = targetPos.X - botPos.X;
@@ -346,11 +355,12 @@ namespace ZeusBotAI
                     var smoothedAngles = new QAngle(newPitch, newYaw, 0);
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- CLASSIC FIRING LOGIC FROM WORKING BACKUP ---
+                    // --- UPDATED FIRING LOGIC: ONLY SHOOT IN ZEUS RANGE (190 UNITS) ---
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
                     
-                    if (distance <= 170.0f && yawDiff < 15.0f && pitchDiff < 15.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
+                    // distance <= 190.0f enforces maximum Zeus kill range
+                    if (distance <= 190.0f && yawDiff < 15.0f && pitchDiff < 15.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
                     }
@@ -394,7 +404,7 @@ namespace ZeusBotAI
             return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
-        // --- WORKING BACKUP WEAPON LOGIC ---
+        // --- UPDATED WEAPON LOGIC ---
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn, bool hasTarget, float distanceToTarget)
         {
             var weaponServices = botPawn.WeaponServices;
@@ -402,6 +412,7 @@ namespace ZeusBotAI
 
             bool hasZeus = false;
             uint taserHandleRaw = 0;
+            bool isTaserReady = false;
 
             if (weaponServices.MyWeapons != null)
             {
@@ -413,11 +424,10 @@ namespace ZeusBotAI
                         hasZeus = true;
                         taserHandleRaw = weaponHandle.Raw;
                         
-                        // Ammo refill is necessary to prevent dropping
-                        if (weapon.Clip1 <= 0)
+                        // Allow the Zeus to recharge naturally. Only flag it as ready if it has ammo.
+                        if (weapon.Clip1 > 0)
                         {
-                            weapon.Clip1 = 1;
-                            Utilities.SetStateChanged(weapon, "CBasePlayerWeapon", "m_iClip1");
+                            isTaserReady = true;
                         }
                         break;
                     }
@@ -430,14 +440,25 @@ namespace ZeusBotAI
             }
             else 
             {
-                // Core fix: They prefer to use the Taser natively when engaged, but are free to hold knives/nades from afar!
-                if (hasTarget && distanceToTarget < 1200.0f)
+                // Core fix: Only force swap if the Taser is loaded AND we aren't holding utility
+                if (hasTarget && distanceToTarget < 1200.0f && isTaserReady)
                 {
                     var activeWeapon = weaponServices.ActiveWeapon.Value;
-                    if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
+                    if (activeWeapon != null && activeWeapon.DesignerName != null)
                     {
-                        weaponServices.ActiveWeapon.Raw = taserHandleRaw;
-                        Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                        // Let the bot throw nades without being interrupted
+                        bool isUtility = activeWeapon.DesignerName.Contains("grenade") || 
+                                         activeWeapon.DesignerName.Contains("flashbang") || 
+                                         activeWeapon.DesignerName.Contains("molotov") || 
+                                         activeWeapon.DesignerName.Contains("incgrenade") || 
+                                         activeWeapon.DesignerName.Contains("decoy");
+
+                        // Only force the taser if they aren't already holding it and aren't holding utility
+                        if (!activeWeapon.DesignerName.Contains("taser") && !isUtility)
+                        {
+                            weaponServices.ActiveWeapon.Raw = taserHandleRaw;
+                            Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                        }
                     }
                 }
             }
