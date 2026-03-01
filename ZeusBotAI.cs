@@ -19,18 +19,17 @@ namespace ZeusBotAI
         public float CurrentAimSpeed { get; set; } = 0.15f; 
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
         public float FearEndTime { get; set; } = 0f;
-        
-        // Anti-Corner Kinematics
         public Vector LastPosition { get; set; } = new Vector(0, 0, 0);
         public float LastStuckCheckTime { get; set; } = 0f;
         public Vector EscapeVector { get; set; } = new Vector(0, 0, 0);
         public float EscapeEndTime { get; set; } = 0f;
+        public float NextFireTime { get; set; } = 0f; // Prevent attack spamming
     }
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Bitwise Trigger Lock & Evasion)";
-        public override string ModuleVersion => "12.0.2";
+        public override string ModuleName => "Zeus Bot AI (Dynamic Trigger & Inventory Strip)";
+        public override string ModuleVersion => "13.0.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -38,12 +37,12 @@ namespace ZeusBotAI
 
         public override void Load(bool hotReload)
         {
-            // Lobotomize the engine's default shooting behavior
-            Server.ExecuteCommand("bot_dont_shoot 1");
+            // Removed bot_dont_shoot 1 so the weapon entity is allowed to discharge
+            Server.ExecuteCommand("bot_dont_shoot 0"); 
             
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v12.0 Anti-Corner Evasion & Bitwise Lock loaded.");
+            Console.WriteLine("[Zeus Bot AI] v13.0 Dynamic Trigger & Inventory Strip loaded.");
         }
 
         private void ProcessBotBrains()
@@ -158,7 +157,7 @@ namespace ZeusBotAI
 
                     bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
                     
-                    // BITWISE TRIGGER LOCK: Physically rip the attack button away from the engine's control.
+                    // BITWISE TRIGGER LOCK: Rip the attack button away from the engine's base AI
                     botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
                     botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Jump;
 
@@ -167,13 +166,11 @@ namespace ZeusBotAI
                     {
                         float distMoved = (botPos - memory.LastPosition).Length();
                         
-                        // If we are grounded, trying to move, but haven't gone further than 25 units in 0.4s: We are stuck.
                         if (distMoved < 25.0f && !isAirborne && distance > 100.0f)
                         {
-                            // Generate an orthogonal slide vector. Randomize left/right to find the exit.
                             float slideDir = random.NextDouble() > 0.5 ? 1.0f : -1.0f;
                             memory.EscapeVector = new Vector(-pursuitDir.Y * slideDir, pursuitDir.X * slideDir, 0);
-                            memory.EscapeEndTime = currentTime + 0.8f; // Commit to the slide for 0.8 seconds
+                            memory.EscapeEndTime = currentTime + 0.8f; 
                         }
 
                         memory.LastPosition = new Vector(botPos.X, botPos.Y, botPos.Z);
@@ -233,7 +230,6 @@ namespace ZeusBotAI
 
                     if (isEscaping)
                     {
-                        // Prioritize sliding off the wall heavily
                         finalMoveDir = new Vector((memory.EscapeVector.X * 1.5f) + (pursuitDir.X * 0.2f), (memory.EscapeVector.Y * 1.5f) + (pursuitDir.Y * 0.2f), 0);
                     }
                     else if (isPincering && distance > 120.0f)
@@ -295,10 +291,15 @@ namespace ZeusBotAI
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
                     }
 
-                    // EXPLICIT FIRING LOGIC: We authorize the attack ONLY here.
-                    if (distance <= 140.0f && yawDiff < 4.0f && pitchDiff < 6.0f && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    // --- DYNAMIC TRIGGER CONE ---
+                    // The closer they are, the wider the cone of acceptance (up to 25 degrees point-blank)
+                    float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
+                    float allowedPitchDiff = 15.0f;
+
+                    if (currentTime >= memory.NextFireTime && distance <= 140.0f && yawDiff < allowedYawDiff && pitchDiff < allowedPitchDiff && currentTime > memory.TargetAcquiredTime + 0.1f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                        memory.NextFireTime = currentTime + 0.3f; // Small cooldown so they click instead of hold
                     }
                 }
             }
@@ -347,7 +348,6 @@ namespace ZeusBotAI
 
             bool hasZeus = false;
 
-            // First pass: Check for Zeus and refill ammo if needed
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -357,7 +357,6 @@ namespace ZeusBotAI
                     {
                         hasZeus = true;
                         
-                        // Keep the Zeus fully loaded so the engine doesn't try to drop it
                         if (weapon.Clip1 <= 0)
                         {
                             weapon.Clip1 = 1;
@@ -367,15 +366,11 @@ namespace ZeusBotAI
                 }
             }
 
-            // If they don't have a Zeus, give them one
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
             }
 
-            // Second pass: Strip EVERYTHING that is not the Zeus
-            // By doing this, the engine natively forces the Zeus to deploy, 
-            // completely fixing the invisible weapon / ghost hands bug.
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -383,7 +378,6 @@ namespace ZeusBotAI
                 {
                     if (!weapon.DesignerName.Contains("taser") && !weapon.DesignerName.Contains("c4"))
                     {
-                        // Remove knives, pistols, rifles, etc.
                         weapon.Remove(); 
                     }
                 }
@@ -439,7 +433,6 @@ namespace ZeusBotAI
 
         public override void Unload(bool hotReload)
         {
-            Server.ExecuteCommand("bot_dont_shoot 0");
             brainTimer?.Kill();
             brainTimer = null;
             botMemory.Clear();
