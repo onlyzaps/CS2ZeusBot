@@ -15,6 +15,8 @@ namespace ZeusBotAI
         public float NextStrafeSwitch { get; set; } = 0f;
         public float StrafeDirection { get; set; } = 1.0f; 
         public float JumpCooldown { get; set; } = 0f;
+        public int ConsecutiveJumps { get; set; } = 0;
+        public float ResetJumpsTime { get; set; } = 0f;
         public float DuckReleaseTime { get; set; } = 0f;
         public float CurrentAimSpeed { get; set; } = 0.15f; 
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
@@ -23,8 +25,8 @@ namespace ZeusBotAI
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI";
-        public override string ModuleVersion => "18.1.3";
+        public override string ModuleName => "Zeus Bot AI (Context Steering & Pro Sweeps)";
+        public override string ModuleVersion => "8.1.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -34,7 +36,7 @@ namespace ZeusBotAI
         {
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v8.0 Pro Context Steering loaded (Wide Swings & Tactical Hops).");
+            Console.WriteLine("[Zeus Bot AI] v8.1 Pro Context Steering loaded (Enhanced Bhopping & Air Strafing).");
         }
 
         private void ProcessBotBrains()
@@ -124,6 +126,11 @@ namespace ZeusBotAI
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn?.MovementServices == null || botPawn.AbsVelocity == null) continue;
 
+                if (currentTime > memory.ResetJumpsTime)
+                {
+                    memory.ConsecutiveJumps = 0;
+                }
+
                 if (memory.CurrentTarget != null && memory.CurrentTarget.IsValid && memory.CurrentTarget.PawnIsAlive)
                 {
                     var targetPawn = memory.CurrentTarget.PlayerPawn.Value;
@@ -166,26 +173,38 @@ namespace ZeusBotAI
 
                     bool isAfraid = currentTime < memory.FearEndTime;
 
-                    // --- THE GOLDILOCKS JUMP MATRIX ---
+                    // --- THE GOLDILOCKS JUMP MATRIX (Bhop Edition) ---
                     if (!isAirborne && currentTime > memory.JumpCooldown)
                     {
                         bool jumpExecuted = false;
 
                         // 1. Evasive Jump (Dodging Crosshair)
-                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.35)
+                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.60) // Increased probability
                         {
                             jumpExecuted = true;
                         }
                         // 2. Aggressive Gap-Closing (The Ferrari Peek)
-                        else if (!isAfraid && distance > 300.0f && distance < 700.0f && random.NextDouble() < 0.20)
+                        else if (!isAfraid && distance > 300.0f && distance < 700.0f && random.NextDouble() < 0.40) // Increased probability
                         {
                             jumpExecuted = true;
                         }
 
-                        if (jumpExecuted)
+                        if (jumpExecuted && memory.ConsecutiveJumps < 3)
                         {
                             botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
-                            memory.JumpCooldown = currentTime + (random.NextSingle() * 0.8f + 0.8f); // 0.8s to 1.6s cooldown
+                            memory.ConsecutiveJumps++;
+                            memory.ResetJumpsTime = currentTime + 1.2f;
+
+                            // Tame the jumps: Allow quick bhopping up to 3 times, then force a cooldown break
+                            if (memory.ConsecutiveJumps >= 3)
+                            {
+                                memory.JumpCooldown = currentTime + 1.2f; // Hard break to prevent physics glitches
+                            }
+                            else
+                            {
+                                memory.JumpCooldown = currentTime + 0.3f; // Short cooldown to allow immediate jump on landing
+                            }
+
                             memory.DuckReleaseTime = currentTime + 0.5f; 
                         }
                     }
@@ -216,7 +235,7 @@ namespace ZeusBotAI
                     if (isAirborne)
                     {
                         // True Air-Strafing: Curve the momentum smoothly into the target vector
-                        finalMoveDir = new Vector(finalMoveDir.X * 1.4f, finalMoveDir.Y * 1.4f, 0);
+                        finalMoveDir = new Vector(finalMoveDir.X * 1.75f, finalMoveDir.Y * 1.75f, 0); // Amplified for better air momentum
                     }
 
                     finalMoveDir.X += memory.RepulsionForce.X;
@@ -261,8 +280,8 @@ namespace ZeusBotAI
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
                     }
 
-                    // TRIGGER DISCIPLINE: Only fire when deeply lined up in the "Kill Zone"
-                    if (distance <= 180.0f && yawDiff < 4.0f && pitchDiff < 6.0f && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    // TRIGGER DISCIPLINE: Only fire when deeply lined up in the "Kill Zone" and guaranteed to hit
+                    if (distance <= 180.0f && yawDiff < 3.0f && pitchDiff < 3.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
                     }
