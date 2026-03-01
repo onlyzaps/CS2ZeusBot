@@ -15,6 +15,7 @@ namespace ZeusBotAI
         public float NextStrafeSwitch { get; set; } = 0f;
         public float StrafeDirection { get; set; } = 1.0f; 
         public float JumpCooldown { get; set; } = 0f;
+        public float DuckReleaseTime { get; set; } = 0f;
         public float CurrentAimSpeed { get; set; } = 0.15f; 
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
         public float FearEndTime { get; set; } = 0f;
@@ -27,8 +28,8 @@ namespace ZeusBotAI
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Grand Unified Strategy)";
-        public override string ModuleVersion => "15.0.1";
+        public override string ModuleName => "Zeus Bot AI (Dynamic Movement, Knives & Nades)";
+        public override string ModuleVersion => "14.0.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -39,7 +40,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v15.0 Grand Unified Strategy loaded.");
+            Console.WriteLine("[Zeus Bot AI] v14.0 Dynamic Movement & Allowlist loaded.");
         }
 
         private void ProcessBotBrains()
@@ -75,7 +76,7 @@ namespace ZeusBotAI
                 {
                     memory.CurrentTarget = target;
                     memory.TargetAcquiredTime = currentTime;
-                    memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.14f; 
+                    memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.14f; // Slightly snappier
                 }
 
                 if (currentTime > memory.NextStrafeSwitch)
@@ -84,7 +85,6 @@ namespace ZeusBotAI
                     memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.5f + 1.0f);
                 }
 
-                // --- ANTI-CLUMPING (Repulsion Force) ---
                 Vector totalRepulsion = new Vector(0, 0, 0);
                 var botPos = botPawn.AbsOrigin;
 
@@ -117,6 +117,7 @@ namespace ZeusBotAI
         {
             float currentTime = Server.CurrentTime;
             var players = Utilities.GetPlayers();
+            var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && p.PlayerPawn.Value != null && p.PlayerPawn.Value.Health > 0 && !p.IsBot).ToList();
             var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
 
             foreach (var kvp in botMemory)
@@ -150,15 +151,17 @@ namespace ZeusBotAI
                     Vector pursuitDir = GetNormalizedVector(botPos, targetPos);
                     Vector strafeDir = new Vector(-pursuitDir.Y * memory.StrafeDirection, pursuitDir.X * memory.StrafeDirection, 0);
                     Vector finalMoveDir = new Vector(0, 0, 0);
-                    float moveSpeed = 260.0f; 
+                    float moveSpeed = 260.0f; // Slightly faster base speed to keep them moving
 
                     bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
                     
+                    // Trigger lock remains, BUT JUMP LOCK IS REMOVED
                     botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
 
-                    // --- AGGRESSION JUMPING ---
+                    // --- LOOSE AGGRESSION JUMPING ---
                     if (!isAirborne && currentTime > memory.JumpCooldown && distance < 800.0f)
                     {
+                        // 4% chance per tick to jump when engaged, forces them to be hoppy
                         if (random.NextDouble() < 0.04)
                         {
                             botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
@@ -166,7 +169,7 @@ namespace ZeusBotAI
                         }
                     }
 
-                    // --- WALL-SLIDE EVASION ---
+                    // --- ANTI-CORNER (Wall-Slide Evasion) ---
                     if (currentTime > memory.LastStuckCheckTime + 0.4f)
                     {
                         float distMoved = (botPos - memory.LastPosition).Length();
@@ -180,42 +183,7 @@ namespace ZeusBotAI
                         memory.LastStuckCheckTime = currentTime;
                     }
 
-                    // --- PINCER FLANKING LOGIC (Restored) ---
-                    Vector pincerWrapDir = new Vector(0, 0, 0);
-                    bool isPincering = false;
-                    int pincerPartners = 0;
-
-                    foreach (var ally in bots)
-                    {
-                        if (ally == bot) continue;
-                        var allyPawn = ally.PlayerPawn.Value;
-                        if (allyPawn == null || allyPawn.AbsOrigin == null) continue;
-
-                        if (botMemory.TryGetValue(ally.Index, out var allyMem) && allyMem.CurrentTarget == memory.CurrentTarget)
-                        {
-                            float allyDist = (allyPawn.AbsOrigin - targetPos).Length();
-                            
-                            if (allyDist < distance + 300.0f) 
-                            {
-                                Vector allyToTarget = GetNormalizedVector(allyPawn.AbsOrigin, targetPos);
-                                Vector perpAngle = new Vector(-allyToTarget.Y, allyToTarget.X, 0);
-                                Vector botToAlly = GetNormalizedVector(botPos, allyPawn.AbsOrigin);
-                                
-                                float sideCheck = DotProduct(perpAngle, botToAlly);
-                                
-                                if (sideCheck > 0) pincerWrapDir = new Vector(pincerWrapDir.X - perpAngle.X, pincerWrapDir.Y - perpAngle.Y, 0);
-                                else pincerWrapDir = new Vector(pincerWrapDir.X + perpAngle.X, pincerWrapDir.Y + perpAngle.Y, 0);
-                                
-                                isPincering = true;
-                                pincerPartners++;
-
-                                if (pincerPartners >= 1) break; 
-                            }
-                        }
-                    }
-                    if (isPincering) pincerWrapDir = NormalizeVector(pincerWrapDir);
-
-                    // --- THREAT AWARENESS (Fear) ---
+                    // --- THREAT AWARENESS ---
                     Vector targetForward = GetForwardVector(targetAngles);
                     Vector dirToBot = GetNormalizedVector(targetPos, botPos);
                     float playerAimDot = DotProduct(targetForward, dirToBot);
@@ -226,21 +194,16 @@ namespace ZeusBotAI
                         memory.StrafeDirection = (random.NextDouble() > 0.5) ? 1.0f : -1.0f; 
                         memory.NextStrafeSwitch = currentTime + 1.5f;
                     }
-
                     bool isAfraid = currentTime < memory.FearEndTime;
                     bool isEscaping = currentTime < memory.EscapeEndTime;
+
+                    // --- HARMONIC DRIFT (The "Loose" Factor) ---
+                    // Creates a continuous wave based on time and their index so they never stand perfectly still
                     float driftFactor = (float)Math.Sin(currentTime * 3.5f + bot.Index) * 0.4f;
 
-                    // --- MASTER KINEMATIC BLENDER ---
                     if (isEscaping)
                     {
                         finalMoveDir = new Vector((memory.EscapeVector.X * 1.5f) + (pursuitDir.X * 0.2f), (memory.EscapeVector.Y * 1.5f) + (pursuitDir.Y * 0.2f), 0);
-                    }
-                    else if (isPincering && distance > 120.0f)
-                    {
-                        // Blending Pursuit, Flanking, and Drift
-                        finalMoveDir = new Vector((pursuitDir.X * 0.5f) + (pincerWrapDir.X * 1.0f) + (strafeDir.X * driftFactor), 
-                                                  (pursuitDir.Y * 0.5f) + (pincerWrapDir.Y * 1.0f) + (strafeDir.Y * driftFactor), 0);
                     }
                     else if (isAfraid)
                     {
@@ -249,6 +212,7 @@ namespace ZeusBotAI
                     }
                     else if (distance > 130.0f) 
                     {
+                        // Blending pursuit with drift to make them look alive
                         finalMoveDir = new Vector((pursuitDir.X * 0.8f) + (strafeDir.X * driftFactor), (pursuitDir.Y * 0.8f) + (strafeDir.Y * driftFactor), 0);
                     }
                     else if (distance > 80.0f) 
@@ -262,7 +226,6 @@ namespace ZeusBotAI
 
                     if (isAirborne) finalMoveDir = new Vector(finalMoveDir.X * 1.2f, finalMoveDir.Y * 1.2f, 0);
 
-                    // Add Repulsion
                     finalMoveDir.X += memory.RepulsionForce.X;
                     finalMoveDir.Y += memory.RepulsionForce.Y;
                     finalMoveDir = NormalizeVector(finalMoveDir);
@@ -284,14 +247,21 @@ namespace ZeusBotAI
 
                     float newYaw = currentYaw + NormalizeAngle(perfectYaw - currentYaw) * memory.CurrentAimSpeed;
                     float newPitch = currentPitch + NormalizeAngle(perfectPitch - currentPitch) * memory.CurrentAimSpeed;
+                    
                     newPitch = Math.Clamp(newPitch, -15.0f, 15.0f); 
                     
                     var smoothedAngles = new QAngle(newPitch, newYaw, 0);
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- DYNAMIC TRIGGER CONE ---
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
+                    
+                    if (currentTime < memory.DuckReleaseTime)
+                    {
+                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
+                    }
+
+                    // --- DYNAMIC TRIGGER CONE ---
                     float allowedYawDiff = distance < 80.0f ? 25.0f : 15.0f;
                     float allowedPitchDiff = 15.0f;
 
@@ -376,6 +346,8 @@ namespace ZeusBotAI
                 {
                     string wName = weapon.DesignerName;
                     
+                    // The Allowlist: Taser, C4, Knives, and all Utility Grenades are strictly permitted.
+                    // Primary and secondary guns (rifles, pistols, shotguns) will be deleted.
                     if (!wName.Contains("taser") && 
                         !wName.Contains("c4") && 
                         !wName.Contains("knife") && 
