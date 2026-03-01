@@ -168,8 +168,25 @@ namespace ZeusBotAI
                 var newAngles = new QAngle(panicPitch, panicYaw, 0);
                 botPawn.Teleport(botPos, newAngles, new Vector(0, 0, 0));
 
-                bot.Buttons |= PlayerButtons.Attack;
-                AddTimer(0.05f, () => { if (bot.IsValid) bot.Buttons &= ~PlayerButtons.Attack; });
+                if (botPawn.MovementServices != null)
+                {
+                    // Inject the +attack command directly into the bot's memory state
+                    botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                    
+                    AddTimer(0.05f, () => 
+                    { 
+                        // Re-validate the pawn after the delay in case they died in that 50ms window
+                        if (bot.IsValid)
+                        {
+                            var currentPawn = bot.PlayerPawn.Value;
+                            if (currentPawn != null && currentPawn.IsValid && currentPawn.MovementServices != null)
+                            {
+                                // Release the trigger
+                                currentPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack; 
+                            }
+                        }
+                    });
+                }
             });
         }
 
