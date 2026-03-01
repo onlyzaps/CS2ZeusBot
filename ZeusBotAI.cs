@@ -30,7 +30,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Bitwise Trigger Lock & Evasion)";
-        public override string ModuleVersion => "12.0.0";
+        public override string ModuleVersion => "12.0.1";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
