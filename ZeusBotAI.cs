@@ -16,7 +16,6 @@ namespace ZeusBotAI
         TargetInZeusRange,
         TargetInKnifeRange,
         HasZeus,
-        HasNade,
         IsSafe,
         WeaponEquipped
     }
@@ -24,7 +23,7 @@ namespace ZeusBotAI
     public class GoapState
     {
         public Dictionary<StateKey, bool> Values { get; set; } = new Dictionary<StateKey, bool>();
-        
+
         public GoapState Clone()
         {
             var clone = new GoapState();
@@ -55,13 +54,8 @@ namespace ZeusBotAI
         public GoapState Preconditions { get; } = new GoapState();
         public GoapState Effects { get; } = new GoapState();
 
-        // Check #1: Procedural Context Precondition
         public virtual bool CheckContextPrecondition(BotAgent agent) => true;
-
-        // Check #2: Sanity Check right before execution
         public virtual bool IsValid(BotAgent agent) => true;
-
-        // Check #3: Execution state / Animation checking
         public abstract bool IsDone(BotAgent agent);
         public abstract void Execute(BotAgent agent, float deltaTime);
         public virtual void OnEnter(BotAgent agent) { }
@@ -73,21 +67,19 @@ namespace ZeusBotAI
         public string Name { get; protected set; } = "BaseGoal";
         public int Priority { get; protected set; }
         public GoapState DesiredState { get; } = new GoapState();
-        
-        // Dynamic priority assessment based on Working Memory
-        public virtual int GetPriority(BotAgent agent) => Priority; 
+        public virtual int GetPriority(BotAgent agent) => Priority;
     }
     #endregion
 
-    #region F.E.A.R. Agent Architecture (Part II Concepts)
+    #region Fact & Memory Architecture
 
-    // Working Memory Fact
     public class Fact
     {
         public CCSPlayerController? Subject;
-        public Vector LastKnownPosition = new Vector(0,0,0);
-        public float Confidence = 1.0f; // Decays over time (0.0 to 1.0)
+        public Vector LastKnownPosition = new Vector(0, 0, 0);
+        public float Confidence = 1.0f;
         public float ThreatLevel = 0f;
+        public float TimeSinceLastSeen = 0f;
     }
 
     public class WorkingMemory
@@ -103,14 +95,18 @@ namespace ZeusBotAI
                 if (fact.Subject == null || !fact.Subject.IsValid || !fact.Subject.PawnIsAlive)
                 {
                     Facts.Remove(key);
-                    continue; // Forget immediately if dead
+                    continue;
                 }
 
-                // Decay confidence over time when out of sight
-                fact.Confidence -= deltaTime * 0.05f; 
+                fact.TimeSinceLastSeen += deltaTime;
+                if (fact.TimeSinceLastSeen > 0.5f) // if not seen half a second, drop confidence rapidly
+                {
+                    fact.Confidence -= deltaTime * 0.2f;
+                }
+
                 if (fact.Confidence <= 0)
                 {
-                    Facts.Remove(key); // Forget target
+                    Facts.Remove(key);
                 }
             }
         }
@@ -123,17 +119,26 @@ namespace ZeusBotAI
         public QAngle DesiredAim = new QAngle(0, 0, 0);
         public ulong ButtonsToPress = 0;
         public Fact? CurrentTargetFact = null;
+        
         public float FearTimer = 0f;
         public float ActionCooldown = 0f;
-        public List<Vector> NearbyAllies = new List<Vector>();
         
-        // Advanced Movement State Machine
-        public float NextStateTime = 0f;
-        public int MovePattern = 0; 
-        public float StrafeDir = 1f;
+        // Navigation & Traversal
+        public Vector Waypoint = new Vector(0,0,0);
         public float JumpCooldown = 0f;
+        public float LastZ = 0f;
+        public int StuckTicks = 0;
+
+        // Combat Engine
+        public float NextStateTime = 0f;
+        public int MovePattern = 0;
+        public float StrafeDir = 1f;
         public int BhopCount = 0;
     }
+
+    #endregion
+
+    #region The Bot Agent
 
     public class BotAgent
     {
@@ -155,14 +160,12 @@ namespace ZeusBotAI
 
         private void InitGoalsAndActions()
         {
-            // Goals
             Goals.Add(new GoalSurvive());
             Goals.Add(new GoalKillEnemy());
-            
-            // Actions
+
             AvailableActions.Add(new ActionEquipZeus());
             AvailableActions.Add(new ActionEquipKnife());
-            AvailableActions.Add(new ActionThrowNade());
+            AvailableActions.Add(new ActionTraverseMap());
             AvailableActions.Add(new ActionApproachTarget());
             AvailableActions.Add(new ActionEvasiveRetreat());
             AvailableActions.Add(new ActionEngageZeus());
@@ -174,74 +177,70 @@ namespace ZeusBotAI
             if (Pawn == null || !Pawn.IsValid) return;
             Vector myPos = Pawn.AbsOrigin!;
             Vector myForward = MathUtils.GetForwardVector(Pawn.EyeAngles!);
-            
-            Blackboard.NearbyAllies.Clear();
 
-            // Track if we found ANY enemies to keep moving towards
-            bool foundEnemy = false;
+            bool foundValidEnemyOnMap = false;
 
             foreach (var player in allPlayers)
             {
                 if (player == Controller || !player.PawnIsAlive) continue;
+                if (player.TeamNum == Controller.TeamNum) continue;
+
                 var otherPawn = player.PlayerPawn.Value;
                 if (otherPawn == null || !otherPawn.IsValid) continue;
 
+                foundValidEnemyOnMap = true;
                 Vector otherPos = otherPawn.AbsOrigin!;
                 float dist = (myPos - otherPos).Length();
                 Vector dirToOther = MathUtils.NormalizeVector(otherPos - myPos);
-                
-                if (player.TeamNum == Controller.TeamNum)
+
+                // Add to memory
+                if (!Memory.Facts.ContainsKey(player.Index))
                 {
-                    if (dist < 300f) // Keep track of allies to avoid crowding
-                    {
-                        Blackboard.NearbyAllies.Add(otherPos);
-                    }
-                    continue; // Skip tracking allies as targets
+                    Memory.Facts[player.Index] = new Fact { Subject = player };
                 }
 
-                // If not our team, it's an enemy (so T bots track CT players, CT bots track T players)
-                foundEnemy = true;
-
-                // Global Knowledge Tracker - keeps them moving across map
-                if (!Memory.Facts.ContainsKey(player.Index))
-                    Memory.Facts[player.Index] = new Fact { Subject = player };
-
                 var fact = Memory.Facts[player.Index];
-                fact.LastKnownPosition = otherPos;
-                fact.Confidence = 1.0f; 
-
-                // LOS Check for entering combat mode
+                
+                // Real Line Of Sight Check
                 float dot = MathUtils.DotProduct(myForward, dirToOther);
-                bool inFOV = dot > 0.4f;
+                bool inFOV = dot > 0.45f;
+                bool isClose = dist < 400f; // Hear footsteps/proximity
 
-                if (inFOV || dist < 500f)
+                // We grant global wallhack "LastKnownPosition" so they always traverse to Enemies
+                // But threat only spikes when actually engaged.
+                fact.LastKnownPosition = otherPos;
+                fact.Confidence = 1.0f;
+
+                if (inFOV || isClose)
                 {
-                    // Combat Mode Threat Calculation
+                    fact.TimeSinceLastSeen = 0f;
+                    
                     Vector enemyForward = MathUtils.GetForwardVector(otherPawn.EyeAngles!);
                     float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
-                    fact.ThreatLevel = Math.Max(0, (5000f - dist) * 2f); 
                     
-                    if (enemyAimDot > 0.9f) fact.ThreatLevel += 3000f; 
-                    if (dist < 300f) fact.ThreatLevel += 5000f; 
-                    
-                    if (enemyAimDot > 0.95f && dist > 800f && Blackboard.FearTimer < currentTime)
+                    // Threat calculation
+                    fact.ThreatLevel = Math.Max(0, (3000f - dist));
+                    if (enemyAimDot > 0.85f) fact.ThreatLevel += 2000f;
+                    if (isClose) fact.ThreatLevel += 3000f;
+
+                    // Heavy threat = trigger survive goal
+                    if (enemyAimDot > 0.95f && dist > 1000f && Blackboard.FearTimer < currentTime)
                     {
                         Blackboard.FearTimer = currentTime + 0.8f;
-                        Interrupt("High Threat Detected - Evasive Retreat");
+                        Interrupt("Under sniper/heavy fire");
                     }
                 }
                 else
                 {
-                    // Passthrough mode - just moving towards general area
-                    fact.ThreatLevel = 100f;
+                    // Not fighting, just hunting. Low threat.
+                    fact.ThreatLevel = 10f; 
                 }
             }
 
-            // If we have no enemies on the map (e.g., all dead or not spawned), clear our targets so we don't act weird
-            if (!foundEnemy)
+            if (!foundValidEnemyOnMap)
             {
                 var keys = Memory.Facts.Keys.ToList();
-                foreach (var key in keys) Memory.Facts.Remove(key);
+                foreach (var k in keys) Memory.Facts.Remove(k);
             }
         }
 
@@ -258,17 +257,20 @@ namespace ZeusBotAI
             state.Values[StateKey.TargetDead] = Blackboard.CurrentTargetFact == null;
             state.Values[StateKey.HasTarget] = Blackboard.CurrentTargetFact != null;
             state.Values[StateKey.IsSafe] = Blackboard.FearTimer < Server.CurrentTime;
-            
+
             if (Blackboard.CurrentTargetFact != null)
             {
                 float dist = (Pawn.AbsOrigin! - Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-                state.Values[StateKey.TargetInZeusRange] = dist < 200f; // Buffer for range
-                state.Values[StateKey.TargetInKnifeRange] = dist < 70f;
+                // If threat is low (we haven't seen them yet), we act like we aren't in range 
+                // so we use Traversal instead of Approach.
+                bool activeCombat = Blackboard.CurrentTargetFact.ThreatLevel > 100f;
+                
+                state.Values[StateKey.TargetInZeusRange] = activeCombat && dist < 220f;
+                state.Values[StateKey.TargetInKnifeRange] = activeCombat && dist < 70f;
             }
             
             state.Values[StateKey.HasZeus] = HasWeapon("taser");
-            state.Values[StateKey.HasNade] = HasWeapon("hegrenade");
-            state.Values[StateKey.WeaponEquipped] = true; 
+            state.Values[StateKey.WeaponEquipped] = true;
 
             return state;
         }
@@ -281,17 +283,28 @@ namespace ZeusBotAI
                 var weapon = w.Value;
                 if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains(name))
                 {
-                    // By removing the Clip1 check, we make sure they still pull out the Zeus 
-                    // even if CS2 initializes its clip slowly immediately upon giving it to them.
                     return true;
                 }
             }
             return false;
         }
     }
+
     #endregion
 
     #region Goals & Actions Implementation
+
+    public class GoalKillEnemy : GoapGoal
+    {
+        public GoalKillEnemy() { Name = "Kill Enemy"; Priority = 50; DesiredState.Values[StateKey.TargetDead] = true; }
+        public override int GetPriority(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null ? 80 : 10;
+    }
+
+    public class GoalSurvive : GoapGoal
+    {
+        public GoalSurvive() { Name = "Survive"; Priority = 100; DesiredState.Values[StateKey.IsSafe] = true; }
+        public override int GetPriority(BotAgent agent) => agent.Blackboard.FearTimer >= Server.CurrentTime ? 100 : 0;
+    }
 
     public class ActionEquipZeus : GoapAction
     {
@@ -302,18 +315,15 @@ namespace ZeusBotAI
             Effects.Values[StateKey.WeaponEquipped] = true;
             Cost = 1f;
         }
-
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
             return activeWeapon != null && activeWeapon.DesignerName.Contains("taser");
         }
-
         public override void Execute(BotAgent agent, float dt)
         {
             var weaponServices = agent.Pawn?.WeaponServices;
             if (weaponServices?.MyWeapons == null) return;
-
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -332,22 +342,18 @@ namespace ZeusBotAI
         public ActionEquipKnife()
         {
             Name = "Equip Knife";
-            // No preconditions needed, bots always have a knife
             Effects.Values[StateKey.WeaponEquipped] = true;
             Cost = 1f;
         }
-
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
             return activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
         }
-
         public override void Execute(BotAgent agent, float dt)
         {
             var weaponServices = agent.Pawn?.WeaponServices;
             if (weaponServices?.MyWeapons == null) return;
-
             foreach (var weaponHandle in weaponServices.MyWeapons)
             {
                 var weapon = weaponHandle.Value;
@@ -361,221 +367,81 @@ namespace ZeusBotAI
         }
     }
 
-    public class ActionEngageKnife : GoapAction
+    // NEW: Clean Map Traversal (Sprinting out of spawn normally)
+    public class ActionTraverseMap : GoapAction
     {
-        public ActionEngageKnife()
+        public ActionTraverseMap()
         {
-            Name = "Engage with Knife";
-            Preconditions.Values[StateKey.TargetInKnifeRange] = true;
-            Preconditions.Values[StateKey.WeaponEquipped] = true;
-            Effects.Values[StateKey.TargetDead] = true;
-            Cost = 2f; 
+            Name = "Traverse Map";
+            Preconditions.Values[StateKey.HasTarget] = true;
+            // Satisfies being in range which hands it off to ApproachTarget when close
+            Effects.Values[StateKey.TargetInZeusRange] = true; 
         }
+
+        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         
-        public override bool CheckContextPrecondition(BotAgent agent) => true;
-        
-        public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
-        public override bool IsDone(BotAgent agent) 
+        public override bool IsDone(BotAgent agent)
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-            return dist > 85f; // Abort if target escapes knife range
+            // If we get close, or they spot us/we spot them (threat spikes), we drop traversal and enter combat approaches.
+            return dist < 600f || agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f;
         }
-        
+
         public override void Execute(BotAgent agent, float dt)
         {
-            if (agent.Blackboard.CurrentTargetFact != null)
+            Vector targetPos = agent.Blackboard.CurrentTargetFact!.LastKnownPosition;
+            Vector myPos = agent.Pawn.AbsOrigin!;
+            Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+            
+            // Standard smooth running
+            agent.Blackboard.DesiredMoveDirection = dirToTarget;
+            agent.Blackboard.DesiredSpeed = 250f;
+
+            // Simple Auto-Jump for curbs/boxes
+            if (agent.Pawn.AbsVelocity != null && agent.Pawn.AbsVelocity.Length() < 50f && Server.CurrentTime > agent.Blackboard.JumpCooldown)
             {
-                Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
-                Vector myPos = agent.Pawn.AbsOrigin!;
-                Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-                Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
-
-                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
-                float currentTime = Server.CurrentTime;
-
-                // Random hop right-click
-                if (isGrounded && agent.Blackboard.JumpCooldown < currentTime && Math.Sin(currentTime * 10f) > 0.6f)
+                agent.Blackboard.StuckTicks++;
+                if (agent.Blackboard.StuckTicks > 15) // Stuck for about 0.25 seconds
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                    agent.Blackboard.JumpCooldown = currentTime + 0.6f;
+                    agent.Blackboard.JumpCooldown = Server.CurrentTime + 1.0f;
+                    agent.Blackboard.StuckTicks = 0;
                 }
-                
-                // Add evasive strafe so it's not a perfect line
-                float erraticSine = (float)Math.Sin(currentTime * 20f);
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 2.0f) + (rightDir * Math.Sign(erraticSine) * 0.5f)); 
-                agent.Blackboard.DesiredSpeed = 260f;
             }
-            if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+            else if (agent.Pawn.AbsVelocity != null && agent.Pawn.AbsVelocity.Length() > 100f)
             {
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
-                agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.8f;
+                agent.Blackboard.StuckTicks = 0;
             }
         }
     }
 
-    public class ActionThrowNade : GoapAction
-    {
-        public ActionThrowNade()
-        {
-            Name = "Throw Nade";
-            Preconditions.Values[StateKey.HasNade] = true;
-            Preconditions.Values[StateKey.HasTarget] = true;
-            Effects.Values[StateKey.TargetDead] = true;
-            Cost = 3f; 
-        }
-        
-        public override bool CheckContextPrecondition(BotAgent agent) => true;
-
-        public override bool IsDone(BotAgent agent) => !HasWeapon(agent, "hegrenade");
-
-        public override void Execute(BotAgent agent, float dt)
-        {
-            var weaponServices = agent.Pawn?.WeaponServices;
-            if (weaponServices?.MyWeapons == null) return;
-
-            var activeWeapon = weaponServices.ActiveWeapon.Value;
-            
-            if (activeWeapon == null || !activeWeapon.DesignerName.Contains("hegrenade"))
-            {
-                foreach (var weaponHandle in weaponServices.MyWeapons)
-                {
-                    var weapon = weaponHandle.Value;
-                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("hegrenade"))
-                    {
-                        weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
-                        Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
-                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f; // Triggers done state and puts on cooldown
-                }
-            }
-        }
-        
-        private bool HasWeapon(BotAgent agent, string name)
-        {
-            if (agent.Pawn?.WeaponServices?.MyWeapons == null) return false;
-            foreach (var w in agent.Pawn.WeaponServices.MyWeapons)
-            {
-                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
-            }
-            return false;
-        }
-    }
-
-    public class GoalKillEnemy : GoapGoal
-    {
-        public GoalKillEnemy() { Name = "Kill Enemy"; Priority = 50; DesiredState.Values[StateKey.TargetDead] = true; }
-        public override int GetPriority(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null ? 80 : 10;
-    }
-
-    public class GoalSurvive : GoapGoal
-    {
-        public GoalSurvive() { Name = "Survive"; Priority = 100; DesiredState.Values[StateKey.IsSafe] = true; }
-        public override int GetPriority(BotAgent agent) => agent.Blackboard.FearTimer >= Server.CurrentTime ? 100 : 0;
-    }
-
-    public class ActionEvasiveRetreat : GoapAction
-    {
-        public ActionEvasiveRetreat()
-        {
-            Name = "Evasive Retreat";
-            Preconditions.Values[StateKey.IsSafe] = false;
-            Effects.Values[StateKey.IsSafe] = true;
-            Cost = 1f;
-        }
-        public override bool IsDone(BotAgent agent) => agent.Blackboard.FearTimer < Server.CurrentTime;
-        public override void Execute(BotAgent agent, float dt)
-        {
-            if (agent.Blackboard.CurrentTargetFact != null)
-            {
-                Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
-                Vector myPos = agent.Pawn.AbsOrigin!;
-                Vector dirAway = MathUtils.NormalizeVector(myPos - targetPos);
-                Vector rightDir = new Vector(-dirAway.Y, dirAway.X, 0);
-
-                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
-                float currentTime = Server.CurrentTime;
-
-                if (currentTime > agent.Blackboard.NextStateTime)
-                {
-                    Random r = new Random();
-                    agent.Blackboard.MovePattern = r.Next(0, 3);
-                    agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 0.8 + 0.3);
-                    agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
-                }
-
-                Vector intendedMvmt = new Vector(0,0,0);
-                
-                if (agent.Blackboard.MovePattern == 0) // Air dodge retreat
-                {
-                    if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
-                    {
-                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                        agent.Blackboard.JumpCooldown = currentTime + 0.5f;
-                    }
-                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 1.5f));
-                    if (!isGrounded) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck; // tuck legs to lower hitbox
-                }
-                else if (agent.Blackboard.MovePattern == 1) // ZigZag fast retreat
-                {
-                    float erraticSine = (float)Math.Sin(currentTime * 15f + agent.Controller.Index);
-                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 1.5f) + (rightDir * Math.Sign(erraticSine)));
-                }
-                else // Slide retreat
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 0.5f) + (rightDir * agent.Blackboard.StrafeDir * 1.2f));
-                }
-
-                // Keep away from allies to avoid easy collaterals/grouping
-                Vector separation = new Vector(0,0,0);
-                foreach (var allyPos in agent.Blackboard.NearbyAllies)
-                {
-                    Vector repulse = agent.Pawn.AbsOrigin! - allyPos;
-                    if (repulse.Length() < 150f) 
-                        separation += MathUtils.NormalizeVector(repulse) * 2f;
-                }
-                
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(intendedMvmt + separation);
-                agent.Blackboard.DesiredSpeed = 260f; // flee fast!
-            }
-        }
-    }
-
+    // Heavy Combat Approaching (B-hops and dodging)
     public class ActionApproachTarget : GoapAction
     {
         public ActionApproachTarget()
         {
-            Name = "Approach Target";
+            Name = "Combat Approach";
             Preconditions.Values[StateKey.HasTarget] = true;
             Effects.Values[StateKey.TargetInZeusRange] = true;
         }
+
         public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
+        
         public override bool IsDone(BotAgent agent) 
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
-            float targetDist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+            float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             bool hasZeus = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
+            var activeWep = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+            bool holdsKnife = activeWep != null && activeWep.DesignerName.Contains("knife");
+
+            // Stop to swap to Zeus just before kill range
+            if (hasZeus && holdsKnife && dist < 450f) return true;
             
-            var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
-            bool isHoldingKnife = activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
-
-            // Stop approach so we can swap to Zeus before we hit lethal range
-            if (hasZeus && isHoldingKnife && targetDist <= 400f)
-            {
-                return true; 
-            }
-
-            return targetDist <= (hasZeus ? 200f : 65f); // Close the gap to lethal range
+            return dist <= (hasZeus ? 210f : 65f);
         }
+
         public override void Execute(BotAgent agent, float dt)
         {
             Vector targetPos = agent.Blackboard.CurrentTargetFact!.LastKnownPosition;
@@ -584,48 +450,24 @@ namespace ZeusBotAI
             Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
             Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
 
-            // We only enter combat mode if we are actually close enough to fight (800 units) 
-            // OR if our threat level indicates they are actively shooting us/looking at us.
-            bool inCombatMode = dist < 800f && agent.Blackboard.CurrentTargetFact.ThreatLevel > 500f;
-
-            if (!inCombatMode)
-            {
-                // Navigate gracefully towards the general area using standard routing (pull knife to run faster)
-                agent.Blackboard.DesiredMoveDirection = dirToTarget;
-                agent.Blackboard.DesiredSpeed = 250f; // Standard CS2 run speed
-                
-                // Allow occasional jumps over obstacles but not erratic spamming
-                if (((uint)agent.Pawn.Flags & 1) != 0 && Server.CurrentTime > agent.Blackboard.JumpCooldown)
-                {
-                    // Check if stuck or running into a wall (very simple heuristic)
-                    if (agent.Pawn.AbsVelocity!.Length() < 50f)
-                    {
-                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                        agent.Blackboard.JumpCooldown = Server.CurrentTime + 1.0f;
-                    }
-                }
-                return;
-            }
-
             bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
             float currentTime = Server.CurrentTime;
 
             if (currentTime > agent.Blackboard.NextStateTime)
             {
                 Random r = new Random();
-                int patternCount = dist > 300f ? 3 : 2;
-                agent.Blackboard.MovePattern = r.Next(0, patternCount);
+                agent.Blackboard.MovePattern = r.Next(0, 3);
                 agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 1.2 + 0.5);
                 agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
-                agent.Blackboard.BhopCount = r.Next(2, 5);
+                agent.Blackboard.BhopCount = r.Next(1, 4);
             }
 
-            Vector intendedMvmt = new Vector(0,0,0);
+            Vector mvmt = new Vector(0,0,0);
             float speed = 250f;
 
             if (agent.Blackboard.MovePattern == 1 && agent.Blackboard.BhopCount > 0)
             {
-                // B-hopping logic
+                // B-Hop
                 if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
@@ -636,53 +478,70 @@ namespace ZeusBotAI
                 
                 if (!isGrounded)
                 {
-                    intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 0.7f));
-                    speed = 280f; // Extra speed while bhoping
+                    mvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 0.7f));
+                    speed = 280f; 
                 }
                 else
                 {
-                    intendedMvmt = dirToTarget;
+                    mvmt = dirToTarget;
                 }
             }
             else if (agent.Blackboard.MovePattern == 2)
             {
-                // Wide Air-strafe dodge
+                // Air Strafe
                 if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
                     agent.Blackboard.JumpCooldown = currentTime + 0.6f;
                 }
                 float wideWeight = isGrounded ? 0.3f : 1.5f; 
-                intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.6f) + (rightDir * agent.Blackboard.StrafeDir * wideWeight));
-                
-                if (!isGrounded && Math.Sin(currentTime * 10f) > 0) 
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-                }
+                mvmt = MathUtils.NormalizeVector((dirToTarget * 0.6f) + (rightDir * agent.Blackboard.StrafeDir * wideWeight));
+                if (!isGrounded) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
             else 
             {
-                // Fast push / Jitter
+                // Jitter Sprint
                 float jitter = (float)Math.Sin(currentTime * 12f + agent.Controller.Index);
                 if (Math.Abs(jitter) > 0.8f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
-                
-                intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
-                if (jitter > 0.9f && dist < 500f)
-                {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-                }
+                mvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
             }
 
-            Vector separation = new Vector(0,0,0);
-            foreach (var allyPos in agent.Blackboard.NearbyAllies)
-            {
-                Vector repulse = myPos - allyPos;
-                if (repulse.Length() < 200f)
-                    separation += MathUtils.NormalizeVector(repulse) * (isGrounded ? 1.5f : 0.5f);
-            }
-
-            agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(intendedMvmt + separation);
+            agent.Blackboard.DesiredMoveDirection = mvmt;
             agent.Blackboard.DesiredSpeed = speed;
+        }
+    }
+
+    public class ActionEvasiveRetreat : GoapAction
+    {
+        public ActionEvasiveRetreat()
+        {
+            Name = "Retreat";
+            Preconditions.Values[StateKey.IsSafe] = false;
+            Effects.Values[StateKey.IsSafe] = true;
+            Cost = 1f;
+        }
+        public override bool IsDone(BotAgent agent) => agent.Blackboard.FearTimer < Server.CurrentTime;
+        public override void Execute(BotAgent agent, float dt)
+        {
+            if (agent.Blackboard.CurrentTargetFact != null)
+            {
+                Vector tPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+                Vector myPos = agent.Pawn.AbsOrigin!;
+                Vector dirAway = MathUtils.NormalizeVector(myPos - tPos);
+                Vector right = new Vector(-dirAway.Y, dirAway.X, 0);
+
+                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+                
+                if (isGrounded && agent.Blackboard.JumpCooldown < Server.CurrentTime)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    agent.Blackboard.JumpCooldown = Server.CurrentTime + 0.5f;
+                }
+                
+                float erratic = (float)Math.Sin(Server.CurrentTime * 15f);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 1.5f) + (right * Math.Sign(erratic)));
+                agent.Blackboard.DesiredSpeed = 260f;
+            }
         }
     }
 
@@ -690,197 +549,200 @@ namespace ZeusBotAI
     {
         public ActionEngageZeus()
         {
-            Name = "Engage with Zeus";
+            Name = "Kill with Zeus";
             Preconditions.Values[StateKey.TargetInZeusRange] = true;
             Preconditions.Values[StateKey.HasZeus] = true;
             Effects.Values[StateKey.TargetDead] = true;
         }
         
         public override bool CheckContextPrecondition(BotAgent agent) => true;
-        
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
-        
-        // Remove the 2-second timeout give up since Zeus recharges fast, and let them keep trying until target dies or leaves range
         public override bool IsDone(BotAgent agent) 
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
-
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-            return dist > 210f; // Target escaped Zeus range, abort engagement
+            return dist > 230f; // Target retreated out of active range, fail and re-plan
         }
         
-        public override void OnEnter(BotAgent agent) 
+        public override void Execute(BotAgent agent, float dt)
         {
-            // Removed give up time initialization
+            if (agent.Blackboard.CurrentTargetFact == null) return;
+
+            Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+            Vector myPos = agent.Pawn.AbsOrigin!;
+            float dist = (targetPos - myPos).Length();
+            Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+            Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+
+            bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+            float time = Server.CurrentTime;
+
+            // Combat Dance
+            if (time > agent.Blackboard.NextStateTime)
+            {
+                Random r = new Random();
+                agent.Blackboard.MovePattern = r.Next(0, 2);
+                agent.Blackboard.NextStateTime = time + 0.5f;
+                agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
+            }
+
+            if (agent.Blackboard.MovePattern == 0)
+            {
+                // Hard ADAD peek
+                float strafeVal = Math.Sign(Math.Sin(time * 20f));
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.1f) + (rightDir * strafeVal));
+                if (strafeVal > 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+            }
+            else
+            {
+                // Aggressive close
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToTarget + (rightDir * agent.Blackboard.StrafeDir * 0.3f));
+            }
+            agent.Blackboard.DesiredSpeed = 250f;
+
+            // Aim Math
+            float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
+            Vector botHead = new Vector(myPos.X, myPos.Y, myPos.Z + eyeHeight);
+            Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 40f);
+            Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
+            Vector curForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
+            
+            float aimDot = MathUtils.DotProduct(curForward, exactDir);
+            
+            // Firing threshold
+            if (aimDot > 0.994f || (dist < 120f && aimDot > 0.980f)) 
+            {
+                if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.5f; 
+                }
+            }
         }
-        
+    }
+
+    public class ActionEngageKnife : GoapAction
+    {
+        public ActionEngageKnife()
+        {
+            Name = "Kill with Knife";
+            Preconditions.Values[StateKey.TargetInKnifeRange] = true;
+            Preconditions.Values[StateKey.WeaponEquipped] = true;
+            Effects.Values[StateKey.TargetDead] = true;
+            Cost = 2f; 
+        }
+        public override bool CheckContextPrecondition(BotAgent agent) => true;
+        public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
+        public override bool IsDone(BotAgent agent) 
+        {
+            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+            return dist > 85f; 
+        }
         public override void Execute(BotAgent agent, float dt)
         {
             if (agent.Blackboard.CurrentTargetFact != null)
             {
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector myPos = agent.Pawn.AbsOrigin!;
-                float distToTarget = (targetPos - myPos).Length();
                 Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-                Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
-
-                bool inCombatMode = distToTarget < 800f && agent.Blackboard.CurrentTargetFact.ThreatLevel > 500f;
-
-                if (!inCombatMode)
-                {
-                    // This is a safety catch. If they are holding a Zeus but aren't actively threatened yet, just walk towards them without shooting.
-                    agent.Blackboard.DesiredMoveDirection = dirToTarget;
-                    agent.Blackboard.DesiredSpeed = 250f;
-                    return;
-                }
-
-                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
-                float currentTime = Server.CurrentTime;
-
-                if (currentTime > agent.Blackboard.NextStateTime)
-                {
-                    Random r = new Random();
-                    agent.Blackboard.MovePattern = r.Next(0, 3);
-                    agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 0.8 + 0.3);
-                    agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
-                }
-
-                float speed = 250f;
-                Vector intendedMvmt = new Vector(0,0,0);
-
-                if (agent.Blackboard.MovePattern == 2)
-                {
-                    // Full jump peek / Air strafe dodging
-                    if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
-                    {
-                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                        agent.Blackboard.JumpCooldown = currentTime + 0.5f;
-                    }
-                    if (!isGrounded)
-                    {
-                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.2f) + (rightDir * agent.Blackboard.StrafeDir * 1.5f));
-                        speed = 280f;
-                    }
-                    else
-                    {
-                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 1.2f) + (rightDir * agent.Blackboard.StrafeDir * 0.5f));
-                    }
-                }
-                else if (agent.Blackboard.MovePattern == 1)
-                {
-                    // Crouch approaching
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-                    intendedMvmt = MathUtils.NormalizeVector(dirToTarget + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
-                }
-                else
-                {
-                    // Hard ADAD Spam
-                    float erraticSine = (float)Math.Sin(currentTime * 20f + agent.Controller.Index);
-                    float strafeVal = Math.Sign(erraticSine);
-                    
-                    if (distToTarget < 160f)
-                    {
-                        if (erraticSine > 0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.1f) + (rightDir * strafeVal));
-                    }
-                    else
-                    {
-                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * strafeVal * 1.2f));
-                    }
-                }
                 
-                agent.Blackboard.DesiredMoveDirection = intendedMvmt;
-                agent.Blackboard.DesiredSpeed = speed;
-                
-                // Track aim precisely (upper chest center mass)
-                float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; // crouch flag 
-                Vector botHead = new Vector(myPos.X, myPos.Y, myPos.Z + eyeHeight);
-                Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 40f);
-                Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
-                Vector currentForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
-                
-                float aimDot = MathUtils.DotProduct(currentForward, exactDir);
-                float dist = (botHead - enemyChest).Length();
-                
-                // Require perfect centering. 0.995f is extremely accurate, preventing premature empty clicks!
-                if (aimDot > 0.994f || (dist < 120f && aimDot > 0.980f)) 
-                {
-                    if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
-                    {
-                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
-                        agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.5f; 
-                    }
-                }
+                agent.Blackboard.DesiredMoveDirection = dirToTarget; 
+                agent.Blackboard.DesiredSpeed = 260f;
+            }
+            if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+            {
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
+                agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.8f;
             }
         }
     }
 
     #endregion
 
-    #region The GOAP Planner (Dijkstra/A* simplification)
+    #region The GOAP Planner 
 
     public class GoapPlanner
     {
         public Queue<GoapAction> Plan(BotAgent agent, GoapGoal goal, GoapState startState)
         {
             var usableActions = agent.AvailableActions.Where(a => a.CheckContextPrecondition(agent)).ToList();
-            List<GoapAction> bestPlan = new List<GoapAction>();
+            List<GoapAction> plan = new List<GoapAction>();
             
             if (goal is GoalSurvive)
             {
-                bestPlan.Add(usableActions.First(a => a is ActionEvasiveRetreat));
+                plan.Add(usableActions.First(a => a is ActionEvasiveRetreat));
+                return new Queue<GoapAction>(plan);
             }
-            else if (goal is GoalKillEnemy)
+            
+            if (goal is GoalKillEnemy)
             {
-                bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
                 float dist = 9999f;
+                bool inActiveCombat = false;
+                
                 if (agent.Blackboard.CurrentTargetFact != null)
                 {
                     dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+                    inActiveCombat = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f;
                 }
 
-                if (hasZeus)
+                bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
+
+                if (!inActiveCombat || dist > 600f)
                 {
-                    if (dist > 400f)
-                    {
-                        var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
-                        if (equipKnife != null) bestPlan.Add(equipKnife);
-                        
-                        var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
-                        if (approach != null) bestPlan.Add(approach);
-                    }
-                    else
-                    {
-                        var equipZeus = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
-                        if (equipZeus != null) bestPlan.Add(equipZeus);
-                        
-                        if (dist > 200f)
-                        {
-                            var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
-                            if (approach != null) bestPlan.Add(approach);
-                        }
-                        
-                        var engageZeus = usableActions.FirstOrDefault(a => a is ActionEngageZeus);
-                        if (engageZeus != null) bestPlan.Add(engageZeus);
-                    }
+                    // Far away or tracking behind walls -> Knife sprint
+                    var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
+                    if (equipKnife != null) plan.Add(equipKnife);
+                    
+                    var traverse = usableActions.FirstOrDefault(a => a is ActionTraverseMap);
+                    if (traverse != null) plan.Add(traverse);
                 }
                 else
                 {
-                    var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
-                    if (equipKnife != null) bestPlan.Add(equipKnife);
-                    
-                    if (dist > 65f)
+                    // In active combat logic 
+                    if (hasZeus)
                     {
-                        var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
-                        if (approach != null) bestPlan.Add(approach);
+                        if (dist > 450f)
+                        {
+                            var prepKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
+                            if (prepKnife != null) plan.Add(prepKnife);
+                            
+                            var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                            if (approach != null) plan.Add(approach);
+                        }
+                        else
+                        {
+                            var pullZeus = usableActions.FirstOrDefault(a => a is ActionEquipZeus);
+                            if (pullZeus != null) plan.Add(pullZeus);
+                            
+                            if (dist > 210f)
+                            {
+                                var approachDodge = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                                if (approachDodge != null) plan.Add(approachDodge);
+                            }
+                            
+                            var kill = usableActions.FirstOrDefault(a => a is ActionEngageZeus);
+                            if (kill != null) plan.Add(kill);
+                        }
                     }
-                    
-                    var engageKnife = usableActions.FirstOrDefault(a => a is ActionEngageKnife);
-                    if (engageKnife != null) bestPlan.Add(engageKnife);
+                    else
+                    {
+                        // No Zeus, pure knife run
+                        var equipKnife = usableActions.FirstOrDefault(a => a is ActionEquipKnife);
+                        if (equipKnife != null) plan.Add(equipKnife);
+                        
+                        if (dist > 65f)
+                        {
+                            var approach = usableActions.FirstOrDefault(a => a is ActionApproachTarget);
+                            if (approach != null) plan.Add(approach);
+                        }
+                        var kill = usableActions.FirstOrDefault(a => a is ActionEngageKnife);
+                        if (kill != null) plan.Add(kill);
+                    }
                 }
             }
 
-            return new Queue<GoapAction>(bestPlan);
+            return new Queue<GoapAction>(plan);
         }
     }
 
@@ -913,11 +775,11 @@ namespace ZeusBotAI
     }
     #endregion
 
-    #region Main Plugin Implementation
+    #region Main Plugin Component
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.3";
+        public override string ModuleName => "Zeus Bot AI (Refactored Core)";
+        public override string ModuleVersion => "3.0.0";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
@@ -927,11 +789,7 @@ namespace ZeusBotAI
         {
             "Zappy", "Sparky", "Zeus", "Bolt", "Zip", "Static", "Flicker", "Thor", "Jolt", "Volt",
             "Watt", "Amp", "Ohm", "Tesla", "Arc", "Ion", "Surge", "Livewire", "Shorty", "Buzzer",
-            "Glow", "Indra", "Raiju", "Flash", "Shock", "Current", "Flux", "Plasma", "Neon", "Zap",
-            "Blitz", "Thunder", "Storm", "Joule", "Hertz", "Dynamo", "Turbine", "Grid", "Circuit", "Fuse",
-            "Breaker", "Switch", "Relay", "Spark", "Singe", "Flare", "Beam", "Ray", "Laser", "Pulse",
-            "Frequency", "Phase", "Ground", "Sparkler", "Crackle", "Snap", "Pop", "Kinetic", "Battery", "Charge",
-            "Proton", "Electron", "Neutron", "Faraday"
+            "Glow", "Indra", "Raiju", "Flash", "Shock", "Plasma", "Neon", "Zap", "Blitz", "Storm"
         };
         private Dictionary<uint, string> assignedNames = new Dictionary<uint, string>();
         private Random rnd = new Random();
@@ -940,7 +798,7 @@ namespace ZeusBotAI
         {
             RegisterListener<Listeners.OnTick>(OnTick);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
-            Console.WriteLine("[Zeus Bot GOAP] Loaded F.E.A.R. Architecture.");
+            Console.WriteLine("[Zeus Bot GOAP] Core Engine v3 loaded.");
         }
 
         private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
@@ -952,7 +810,6 @@ namespace ZeusBotAI
                 {
                     assignedNames[controller.Index] = BotNames[rnd.Next(BotNames.Length)];
                 }
-                
                 string desiredName = assignedNames[controller.Index];
 
                 Server.NextFrame(() => {
@@ -961,7 +818,6 @@ namespace ZeusBotAI
                         controller.PlayerName = desiredName;
                         Utilities.SetStateChanged(controller, "CBasePlayerController", "m_iszPlayerName");
                         
-                        // Force give the taser if they don't have it on spawn to fix the "perpetual knife" glitch
                         var pawn = controller.PlayerPawn.Value;
                         if (pawn != null && pawn.IsValid)
                         {
@@ -977,7 +833,6 @@ namespace ZeusBotAI
                                     }
                                 }
                             }
-                            
                             if (!hasZeus)
                             {
                                 controller.GiveNamedItem("weapon_taser");
@@ -1007,23 +862,13 @@ namespace ZeusBotAI
                     agents[bot.Index] = agent;
                 }
 
-                if (tickCounter % 10 == bot.Index % 10) 
+                if (tickCounter % 5 == bot.Index % 5) 
                 {
                     agent.UpdateSensor(allAlivePlayers, currentTime);
-                    agent.Memory.Update(dt * 10f); 
+                    agent.Memory.Update(dt * 5f); 
                 }
 
                 ProcessAgentIntelligence(agent, currentTime, dt);
-                
-                // Final safety switch: Ensure NO combat buttons are pressed if Threat is extremely low
-                if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel <= 100f)
-                {
-                    // Erase crouching and attack bindings if we aren't in active combat
-                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Duck);
-                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Attack);
-                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Attack2);
-                }
-
                 InjectMotorCommands(agent);
             }
         }
@@ -1032,9 +877,13 @@ namespace ZeusBotAI
         {
             var facts = agent.Memory.Facts.Values.OrderByDescending(f => f.ThreatLevel * f.Confidence).ToList();
             agent.Blackboard.CurrentTargetFact = facts.FirstOrDefault();
+            
+            // Wipe inputs every frame completely fresh
             agent.Blackboard.ButtonsToPress = 0; 
             agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0);
+            agent.Blackboard.DesiredSpeed = 0f;
 
+            // Planner validation
             if (agent.CurrentPlan.Count == 0 && agent.CurrentAction == null)
             {
                 var topGoal = agent.Goals.OrderByDescending(g => g.GetPriority(agent)).First();
@@ -1051,7 +900,7 @@ namespace ZeusBotAI
                 if (agent.CurrentAction.IsValid(agent))
                     agent.CurrentAction.OnEnter(agent);
                 else
-                    agent.Interrupt("Action Invalidated Context");
+                    agent.Interrupt("Action Invalidated");
             }
 
             if (agent.CurrentAction != null)
@@ -1064,17 +913,15 @@ namespace ZeusBotAI
                 }
             }
 
-            if (agent.Blackboard.CurrentTargetFact != null)
+            // Aim alignment
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.DesiredMoveDirection.Length() > 0)
             {
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector botPos = agent.Pawn.AbsOrigin!;
                 
-                // Human-like prediction aim: pull towards center mass but anticipate movement
-                float dist = (targetPos - botPos).Length();
-                
                 float dx = targetPos.X - botPos.X;
                 float dy = targetPos.Y - botPos.Y;
-                float dz = (targetPos.Z + 40f) - (botPos.Z + 64f); // Account for bot head height to player chest
+                float dz = (targetPos.Z + 40f) - (botPos.Z + 64f); 
 
                 float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
@@ -1082,10 +929,7 @@ namespace ZeusBotAI
                 float currentYaw = agent.Pawn.EyeAngles!.Y;
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 
-                // Very fast "flicky" aim lerp. Fast enough to track wild ADAD, but smooth enough to not look like a blatant spinbot
-                float aimLerp = 0.55f; 
-                if (dist < 250f || agent.CurrentAction is ActionEngageZeus) aimLerp = 0.85f; // Hard track during engagement
-                if (agent.Blackboard.CurrentTargetFact.ThreatLevel > 2000f) aimLerp = 0.65f; 
+                float aimLerp = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 0.7f : 0.3f; // Snap to aim only in combat
                 
                 float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * aimLerp;
                 float newPitch = Math.Clamp(currentPitch + MathUtils.NormalizeAngle(perfectPitch - currentPitch) * aimLerp, -89f, 89f);
@@ -1097,20 +941,26 @@ namespace ZeusBotAI
         private void InjectMotorCommands(BotAgent agent)
         {
             var pawn = agent.Pawn;
-            if (pawn?.MovementServices == null) return;
+            if (pawn?.MovementServices == null || !pawn.IsValid) return;
+
+            // Stop them from walking if there's no desired vector 
+            if (agent.Blackboard.DesiredSpeed == 0f) return;
 
             Vector dir = agent.Blackboard.DesiredMoveDirection;
             float speed = agent.Blackboard.DesiredSpeed;
             Vector currentVel = pawn.AbsVelocity!;
-            
             float zVel = currentVel.Z;
             
-            // Actually apply jump physics on the Z axis since Teleport overrides it!
+            // Gravity and physics fix. If they are floating, apply downward velocity so they drop down to the map
+            bool isGrounded = ((uint)pawn.Flags & 1) != 0;
+            if (!isGrounded && zVel > -500f) 
+            {
+                zVel -= 15f; 
+            }
+
             if ((agent.Blackboard.ButtonsToPress & (ulong)PlayerButtons.Jump) != 0)
             {
-                bool isGrounded = ((uint)pawn.Flags & 1) != 0;
-                
-                // Cliff jump prevention: avoid yeeting off drops if the target is far and below us
+                // Cliff safety prevention
                 bool safeToJump = true;
                 if (agent.Blackboard.CurrentTargetFact != null)
                 {
@@ -1118,15 +968,17 @@ namespace ZeusBotAI
                     float zDiff = pawn.AbsOrigin!.Z - targetPos.Z;
                     float xyDist = (float)Math.Sqrt(Math.Pow(pawn.AbsOrigin.X - targetPos.X, 2) + Math.Pow(pawn.AbsOrigin.Y - targetPos.Y, 2));
                     
-                    if (zDiff > 80f && xyDist > 200f) 
-                    {
-                        safeToJump = false; 
-                    }
+                    if (zDiff > 100f && xyDist > 200f) safeToJump = false; 
                 }
                 
-                if (isGrounded && safeToJump)
+                if (isGrounded && safeToJump && Server.CurrentTime > agent.Blackboard.JumpCooldown)
                 {
-                    zVel = 300f; // Standard CS2 jump impulse
+                    zVel = 300f; // Actual jump force
+                }
+                else
+                {
+                    // Revoke jump button if unsafe so they don't stutter 
+                    agent.Blackboard.ButtonsToPress &= ~((ulong)PlayerButtons.Jump);
                 }
             }
             
@@ -1140,7 +992,6 @@ namespace ZeusBotAI
         public override void Unload(bool hotReload)
         {
             RemoveListener<Listeners.OnTick>(OnTick);
-            // CounterStrikeSharp usually automatically unregisters event handlers, but we clear our dictionaries
             agents.Clear();
             assignedNames.Clear();
         }
