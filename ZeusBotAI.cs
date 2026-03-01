@@ -11,7 +11,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI";
-        public override string ModuleVersion => "1.1.5";
+        public override string ModuleVersion => "1.3.0";
         private CounterStrikeSharp.API.Modules.Timers.Timer? botAiTimer;
         
         // Tracks which bots are currently "reacting" so we don't spam timers on them
@@ -22,7 +22,7 @@ namespace ZeusBotAI
         {
             // Run our main scanner 10 times a second
             botAiTimer = AddTimer(0.1f, RunBotScanner, TimerFlags.REPEAT);
-            Console.WriteLine("[Zeus Bot AI] Humanized behavior tree loaded.");
+            Console.WriteLine("[Zeus Bot AI] Dynamic Threat Matrix and dodging loaded.");
         }
 
         private void RunBotScanner()
@@ -31,39 +31,64 @@ namespace ZeusBotAI
             var bots = players.Where(p => p != null && p.IsValid && p.IsBot && p.PawnIsAlive).ToList();
             
             if (!bots.Any()) return;
-        
+
             var aliveEnemies = players.Where(p => p != null && p.IsValid && p.PawnIsAlive && !p.IsBot).ToList();
-        
+
             foreach (var bot in bots)
             {
                 var botPawn = bot.PlayerPawn.Value;
                 if (botPawn == null) continue;
-        
+
+                // If this bot is already in the middle of a reaction delay, leave them alone
                 if (reactingBots.Contains(bot.Index)) continue;
-        
-                var target = GetNearestEnemyInFOV(bot, botPawn, aliveEnemies);
+
+                var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
                 if (target == null) continue;
-        
+
                 var targetPawn = target.PlayerPawn.Value;
                 if (targetPawn == null) continue;
-        
-                float distance = (botPawn.AbsOrigin! - targetPawn.AbsOrigin!).Length();
-        
-                // CONCEALED CARRY LOGIC:
-                // Only force the bot to pull out the Zeus if the player is getting close.
-                // 350 units gives the bot roughly 1 second to play the "deploy" animation before firing.
-                if (distance <= 350.0f)
+
+                var botOrigin = botPawn.AbsOrigin;
+                var targetOrigin = targetPawn.AbsOrigin;
+                if (botOrigin == null || targetOrigin == null) continue;
+
+                float distance = (botOrigin - targetOrigin).Length();
+
+                // CONCEALED CARRY & MOVEMENT LOGIC
+                if (distance <= 500.0f)
                 {
                     EnsureBotHasAndHoldsZeus(bot, botPawn);
-        
+
+                    // If they are outside zap range but close enough to push, inject chaotic movement
+                    if (distance > 180.0f)
+                    {
+                        // 15% chance per tick (0.1s) to jump, simulating a frantic push
+                        if (random.NextDouble() < 0.15 && botPawn.MovementServices != null)
+                        {
+                            botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
+                            
+                            // Add a mid-air crouch 100ms later to tuck their legs (harder to hit)
+                            AddTimer(0.1f, () => {
+                                if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
+                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
+                            });
+
+                            // Release the buttons half a second later so they can land and run
+                            AddTimer(0.5f, () => {
+                                if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
+                                {
+                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Jump;
+                                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Duck;
+                                }
+                            });
+                        }
+                    }
                     // If they close the gap to 180 units, pull the trigger
-                    if (distance <= 180.0f)
+                    else if (distance <= 180.0f)
                     {
                         StartHumanReaction(bot, botPawn, targetPawn);
                     }
                 }
-                // If the player is further than 350 units, we leave the bot alone.
-                // This stops the AI from infinitely dropping the weapon.
             }
         }
 
@@ -71,22 +96,25 @@ namespace ZeusBotAI
         {
             var weaponServices = botPawn.WeaponServices;
             if (weaponServices == null) return;
-        
+
             bool hasZeus = false;
             uint taserHandleRaw = 0;
-        
+
             // Scan their inventory for the Zeus and grab its exact memory handle
-            foreach (var weaponHandle in weaponServices.MyWeapons)
+            if (weaponServices.MyWeapons != null)
             {
-                var weapon = weaponHandle.Value;
-                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
-                    hasZeus = true;
-                    taserHandleRaw = weaponHandle.Raw;
-                    break;
+                    var weapon = weaponHandle.Value;
+                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                    {
+                        hasZeus = true;
+                        taserHandleRaw = weaponHandle.Raw;
+                        break;
+                    }
                 }
             }
-        
+
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
@@ -97,7 +125,7 @@ namespace ZeusBotAI
                 var activeWeapon = weaponServices.ActiveWeapon.Value;
                 if (activeWeapon != null && activeWeapon.DesignerName != null && !activeWeapon.DesignerName.Contains("taser"))
                 {
-                    // Forcefully jam the Zeus into their active weapon slot
+                    // Forcefully jam the Zeus into their active weapon slot via memory manipulation
                     weaponServices.ActiveWeapon.Raw = taserHandleRaw;
                     
                     // Tell the server to network this change immediately so they don't T-pose
@@ -106,50 +134,83 @@ namespace ZeusBotAI
             }
         }
 
-        private CCSPlayerController? GetNearestEnemyInFOV(CCSPlayerController bot, CCSPlayerPawn botPawn, List<CCSPlayerController> enemies)
+        private CCSPlayerController? GetHighestPriorityTarget(CCSPlayerController bot, CCSPlayerPawn botPawn, List<CCSPlayerController> enemies)
         {
             CCSPlayerController? bestTarget = null;
-            float shortestDistance = float.MaxValue;
+            float highestThreatScore = -float.MaxValue;
 
-            var botPos = botPawn.AbsOrigin!;
-            var botAngles = botPawn.EyeAngles; // Where the bot is currently looking
-            if (botAngles == null) return null;
+            var botPos = botPawn.AbsOrigin;
+            var botAngles = botPawn.EyeAngles;
+            if (botPos == null || botAngles == null) return null;
 
-            // Convert bot's Pitch/Yaw into a forward-facing 3D vector
-            float pitchRad = botAngles.X * (float)(Math.PI / 180.0);
-            float yawRad = botAngles.Y * (float)(Math.PI / 180.0);
-            Vector botForward = new Vector(
-                (float)(Math.Cos(yawRad) * Math.Cos(pitchRad)),
-                (float)(Math.Sin(yawRad) * Math.Cos(pitchRad)),
-                (float)(-Math.Sin(pitchRad))
-            );
+            Vector botForward = GetForwardVector(botAngles);
 
             foreach (var enemy in enemies)
             {
                 if (enemy.TeamNum == bot.TeamNum) continue;
-
+                
                 var enemyPawn = enemy.PlayerPawn.Value;
                 if (enemyPawn == null) continue;
-
-                var enemyPos = enemyPawn.AbsOrigin!;
-                float distance = (botPos - enemyPos).Length();
-
-                // Vector from bot to enemy
-                Vector directionToEnemy = new Vector(enemyPos.X - botPos.X, enemyPos.Y - botPos.Y, enemyPos.Z - botPos.Z);
                 
-                // Normalize it (make its length 1)
-                float length = (float)Math.Sqrt(directionToEnemy.X * directionToEnemy.X + directionToEnemy.Y * directionToEnemy.Y + directionToEnemy.Z * directionToEnemy.Z);
-                directionToEnemy.X /= length;
-                directionToEnemy.Y /= length;
-                directionToEnemy.Z /= length;
+                var enemyPos = enemyPawn.AbsOrigin;
+                var enemyAngles = enemyPawn.EyeAngles;
+                if (enemyPos == null || enemyAngles == null) continue;
 
-                // Dot product calculates the angle difference. 1.0 is dead center. 0.0 is exactly 90 degrees to the side.
-                // 0.5 roughly translates to a 120-degree cone of vision in front of the bot.
-                float dotProduct = (botForward.X * directionToEnemy.X) + (botForward.Y * directionToEnemy.Y) + (botForward.Z * directionToEnemy.Z);
+                float distance = (botPos - enemyPos).Length();
+                if (distance > 1500.0f) continue; // Ignore enemies across the map
 
-                if (dotProduct > 0.5f && distance < shortestDistance)
+                float threatScore = 0;
+
+                // 1. DISTANCE: Base threat (Closer = exponentially more threatening)
+                threatScore += (1500.0f - distance);
+
+                Vector dirToEnemy = GetNormalizedVector(botPos, enemyPos);
+                Vector dirToBot = GetNormalizedVector(enemyPos, botPos);
+                Vector enemyForward = GetForwardVector(enemyAngles);
+
+                // 2. ENEMY READINESS: Is the enemy looking at the bot?
+                float enemyDot = DotProduct(enemyForward, dirToBot);
+                if (enemyDot > 0.85f) 
+                    threatScore += 600.0f; // MASSIVE THREAT: They are aiming at the bot
+                else if (enemyDot > 0.5f) 
+                    threatScore += 250.0f; // They are looking in the bot's general direction
+
+                // 3. BOT MOMENTUM: Is the bot already looking at them?
+                float botDot = DotProduct(botForward, dirToEnemy);
+                if (botDot > 0.7f) 
+                    threatScore += 400.0f; // Human commitment: prioritize targets in front of us
+                else if (botDot < 0.0f) 
+                    threatScore -= 300.0f; // Human reluctance: penalize targets behind us (avoid 180 flicks)
+
+                // 4. WEAPON STATE: Are they defenseless?
+                var weaponServices = enemyPawn.WeaponServices;
+                if (weaponServices?.ActiveWeapon?.Value != null)
                 {
-                    shortestDistance = distance;
+                    string weaponName = weaponServices.ActiveWeapon.Value.DesignerName ?? "";
+                    if (weaponName.Contains("grenade") || weaponName.Contains("flashbang") || weaponName.Contains("smokegrenade") || weaponName.Contains("decoy") || weaponName.Contains("molotov") || weaponName.Contains("incgrenade") || weaponName.Contains("c4"))
+                    {
+                        threatScore -= 400.0f; // Defenseless target, lower priority
+                    }
+                    else if (weaponName.Contains("knife"))
+                    {
+                        threatScore -= 150.0f; // Only a threat if super close
+                    }
+                    else 
+                    {
+                        threatScore += 200.0f; // Armed target, higher priority
+                    }
+                }
+
+                // 5. THE ZEUS OVERRIDE
+                if (distance <= 200.0f)
+                {
+                    threatScore += 2000.0f; // If anyone is inside Zap range, kill them immediately
+                }
+
+                // Final tally
+                if (threatScore > highestThreatScore)
+                {
+                    highestThreatScore = threatScore;
                     bestTarget = enemy;
                 }
             }
@@ -188,9 +249,9 @@ namespace ZeusBotAI
                 float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
 
-                // Add "Panic Inaccuracy" (-5 to +5 degrees off center) so it doesn't look like an aimbot
-                float panicYaw = perfectYaw + ((random.NextSingle() * 10.0f) - 5.0f);
-                float panicPitch = perfectPitch + ((random.NextSingle() * 10.0f) - 5.0f);
+                // Add Tightened "Panic Inaccuracy" (-2 to +2 degrees off center)
+                float panicYaw = perfectYaw + ((random.NextSingle() * 4.0f) - 2.0f);
+                float panicPitch = perfectPitch + ((random.NextSingle() * 4.0f) - 2.0f);
 
                 var newAngles = new QAngle(panicPitch, panicYaw, 0);
                 botPawn.Teleport(botPos, newAngles, new Vector(0, 0, 0));
@@ -215,6 +276,35 @@ namespace ZeusBotAI
                     });
                 }
             });
+        }
+
+        // --- 3D VECTOR MATH HELPERS ---
+
+        private Vector GetForwardVector(QAngle angles)
+        {
+            float pitchRad = angles.X * (float)(Math.PI / 180.0);
+            float yawRad = angles.Y * (float)(Math.PI / 180.0);
+            return new Vector(
+                (float)(Math.Cos(yawRad) * Math.Cos(pitchRad)),
+                (float)(Math.Sin(yawRad) * Math.Cos(pitchRad)),
+                (float)(-Math.Sin(pitchRad))
+            );
+        }
+
+        private Vector GetNormalizedVector(Vector from, Vector to)
+        {
+            Vector dir = new Vector(to.X - from.X, to.Y - from.Y, to.Z - from.Z);
+            float length = (float)Math.Sqrt(dir.X * dir.X + dir.Y * dir.Y + dir.Z * dir.Z);
+            if (length == 0) return new Vector(0, 0, 0);
+            dir.X /= length;
+            dir.Y /= length;
+            dir.Z /= length;
+            return dir;
+        }
+
+        private float DotProduct(Vector v1, Vector v2)
+        {
+            return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
         public override void Unload(bool hotReload)
