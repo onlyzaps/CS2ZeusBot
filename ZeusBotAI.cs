@@ -8,21 +8,24 @@ using System.Linq;
 
 namespace ZeusBotAI
 {
-    // A dedicated memory class for each bot to track its combat state smoothly
     public class CombatState
     {
-        public bool IsEngaging { get; set; } = false;
-        public bool IsReacting { get; set; } = false;
+        public CCSPlayerController? CurrentTarget { get; set; }
+        public float TargetAcquiredTime { get; set; } = 0f;
         public ulong CurrentStrafeKey { get; set; } = 0;
         public float NextStrafeSwitch { get; set; } = 0f;
-        public ulong CurrentMovementMask { get; set; } = 0;
         public float JumpCooldown { get; set; } = 0f;
+        public float DuckReleaseTime { get; set; } = 0f;
+        public ulong CurrentMovementMask { get; set; } = 0;
+        
+        // Dynamic aim speed to simulate human mouse movement
+        public float CurrentAimSpeed { get; set; } = 0.15f; 
     }
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Advanced Combat State Machine)";
-        public override string ModuleVersion => "2.0.2";
+        public override string ModuleName => "Zeus Bot AI (Fluid Aim & Aggressive Brawler)";
+        public override string ModuleVersion => "3.0.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -30,13 +33,13 @@ namespace ZeusBotAI
 
         public override void Load(bool hotReload)
         {
-            // The Brain: Processes situational awareness 10 times a second
+            // The Brain: Target selection and macro-tactics (10Hz)
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             
-            // The Nervous System: Injects physical movement keystrokes 64 times a second
-            RegisterListener<Listeners.OnTick>(InjectMovementPhysics);
+            // The Nervous System: Fluid aiming, trigger discipline, and movement physics (64Hz)
+            RegisterListener<Listeners.OnTick>(InjectPhysicsAndAim);
             
-            Console.WriteLine("[Zeus Bot AI] v2.0 Tactical State Machine loaded. Jitter fixed.");
+            Console.WriteLine("[Zeus Bot AI] v3.0 Fluid Aim & Aggressive Pushing loaded.");
         }
 
         private void ProcessBotBrains()
@@ -62,12 +65,20 @@ namespace ZeusBotAI
 
                 var target = GetHighestPriorityTarget(bot, botPawn, aliveEnemies);
                 
-                // If no valid target is nearby, release movement control to the default CS2 Bot AI
                 if (target == null) 
                 {
-                    memory.IsEngaging = false;
+                    memory.CurrentTarget = null;
                     memory.CurrentMovementMask = 0;
                     continue;
+                }
+
+                // If this is a newly acquired target, register the reaction start time
+                if (memory.CurrentTarget != target)
+                {
+                    memory.CurrentTarget = target;
+                    memory.TargetAcquiredTime = currentTime;
+                    // Randomize how fast this specific "mouse swipe" will be (7% to 20% smoothing per tick)
+                    memory.CurrentAimSpeed = (random.NextSingle() * 0.13f) + 0.07f; 
                 }
 
                 var targetPawn = target.PlayerPawn.Value;
@@ -79,157 +90,147 @@ namespace ZeusBotAI
 
                 float distance = (botOrigin - targetOrigin).Length();
 
-                if (distance <= 600.0f)
+                if (distance <= 800.0f) // Extended awareness range for aggressive pushing
                 {
-                    memory.IsEngaging = true;
                     EnsureBotHasAndHoldsZeus(bot, botPawn);
-
                     ulong newMask = 0;
 
-                    // --- STRAFE DIRECTION LOGIC ---
-                    // Randomly switch left/right strafing to be unpredictable (every 0.4 to 1.5 seconds)
+                    // --- AGGRESSIVE STRAFE LOGIC ---
                     if (currentTime > memory.NextStrafeSwitch)
                     {
                         memory.CurrentStrafeKey = random.NextDouble() > 0.5 ? (ulong)PlayerButtons.Moveleft : (ulong)PlayerButtons.Moveright;
-                        memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.1f + 0.4f);
+                        // Faster strafe swapping for a more erratic, "crackhead" playstyle
+                        memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 0.7f + 0.2f);
                     }
                     newMask |= memory.CurrentStrafeKey;
 
-                    // --- TACTICAL DISTANCE MANAGEMENT ---
-                    if (distance > 250.0f)
+                    // --- RELENTLESS PUSH LOGIC ---
+                    // Never back down unless literally colliding (distance < 50)
+                    if (distance > 130.0f)
                     {
-                        // Serpentine Approach: Close the gap fast but zig-zag
-                        newMask |= (ulong)PlayerButtons.Forward;
+                        newMask |= (ulong)PlayerButtons.Forward; // Always hold W to close the gap
                     }
-                    else if (distance < 130.0f)
+                    else if (distance < 50.0f)
                     {
-                        // Tactical Retreat: Kiting backward if the human pushes too hard
-                        newMask |= (ulong)PlayerButtons.Back;
+                        newMask |= (ulong)PlayerButtons.Back; // Step back just enough to not get physically body-blocked
                     }
-                    // If distance is between 130 and 250, do not press W or S. purely circle-strafe using the A/D keys assigned above.
 
-                    // --- EVASIVE MANEUVERS (Bunnyhopping & Duck-peeking) ---
-                    if (currentTime > memory.JumpCooldown && random.NextDouble() < 0.15)
+                    // --- HOPPY / BUNNYHOP LOGIC ---
+                    // If far away, jump constantly to close the gap safely. If close, jump occasionally to throw off aim.
+                    float jumpChance = distance > 250.0f ? 0.30f : 0.08f;
+                    
+                    if (currentTime > memory.JumpCooldown && random.NextDouble() < jumpChance)
                     {
                         newMask |= (ulong)PlayerButtons.Jump;
-                        memory.JumpCooldown = currentTime + 1.2f; // Don't spam jump too fast
+                        memory.JumpCooldown = currentTime + (random.NextSingle() * 0.5f + 0.5f); 
                         
-                        // Mid-air crouch injection
-                        AddTimer(0.15f, () => {
-                            if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
-                                bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
-                        });
+                        // Add a mid-air crouch to tuck legs (harder to hit)
+                        newMask |= (ulong)PlayerButtons.Duck;
+                        memory.DuckReleaseTime = currentTime + 0.4f;
+                    }
+
+                    // Maintain ducking if currently in a mid-air tuck
+                    if (currentTime < memory.DuckReleaseTime)
+                    {
+                        newMask |= (ulong)PlayerButtons.Duck;
                     }
 
                     memory.CurrentMovementMask = newMask;
-
-                    // --- THE KILL SHOT ---
-                    if (distance <= 170.0f && !memory.IsReacting)
-                    {
-                        ExecuteFlickShot(bot, botPawn, targetPawn, memory);
-                    }
                 }
                 else
                 {
-                    memory.IsEngaging = false;
+                    memory.CurrentTarget = null;
                     memory.CurrentMovementMask = 0;
                 }
             }
         }
 
-        private void InjectMovementPhysics()
+        private void InjectPhysicsAndAim()
         {
+            float currentTime = Server.CurrentTime;
+
             foreach (var kvp in botMemory)
             {
                 var memory = kvp.Value;
-                if (!memory.IsEngaging || memory.CurrentMovementMask == 0) continue; 
-
                 var bot = Utilities.GetPlayerFromIndex((int)kvp.Key);
-                if (bot != null && bot.IsValid && bot.PawnIsAlive && bot.PlayerPawn.Value?.MovementServices != null)
-                {
-                    // 1. Strip the default Bot AI's movement intentions
-                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~((ulong)PlayerButtons.Forward | (ulong)PlayerButtons.Back | (ulong)PlayerButtons.Moveleft | (ulong)PlayerButtons.Moveright);
-                    
-                    // 2. Inject our State Machine's continuous movement mask
-                    bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] |= memory.CurrentMovementMask;
-                }
-            }
-        }
-
-        private void ExecuteFlickShot(CCSPlayerController bot, CCSPlayerPawn botPawn, CCSPlayerPawn targetPawn, CombatState memory)
-        {
-            memory.IsReacting = true;
-
-            var botPos = botPawn.AbsOrigin;
-            var targetPos = targetPawn.AbsOrigin;
-            var botAngles = botPawn.EyeAngles;
-
-            if (botPos == null || targetPos == null || botAngles == null)
-            {
-                memory.IsReacting = false;
-                return;
-            }
-
-            float deltaX = targetPos.X - botPos.X;
-            float deltaY = targetPos.Y - botPos.Y;
-            float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
-
-            float currentYaw = botAngles.Y;
-            float yawDifference = Math.Abs(perfectYaw - currentYaw);
-            if (yawDifference > 180.0f) yawDifference = 360.0f - yawDifference;
-
-            // Fluid flick timing based on degree of angle change
-            float baseReaction = (random.NextSingle() * 0.08f) + 0.08f;
-            float flickPenalty = (yawDifference / 180.0f) * 0.12f; 
-            float reactionTime = baseReaction + flickPenalty;
-
-            AddTimer(reactionTime, () =>
-            {
-                memory.IsReacting = false;
-
-                if (!bot.IsValid || !bot.PawnIsAlive || !targetPawn.IsValid) return;
-
-                var newBotPos = botPawn.AbsOrigin;
-                var newTargetPos = targetPawn.AbsOrigin;
-                if (newBotPos == null || newTargetPos == null) return;
-
-                float distance = (newBotPos - newTargetPos).Length();
-                if (distance > 185.0f) return; // The human strafed out of range during our reaction time! Cancel shot.
-
-                deltaX = newTargetPos.X - newBotPos.X;
-                deltaY = newTargetPos.Y - newBotPos.Y;
-                float deltaZ = (newTargetPos.Z + 40.0f) - (newBotPos.Z + 40.0f); 
-
-                perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
-                float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
-
-                float inaccuracyScale = 1.0f + ((yawDifference / 180.0f) * 2.5f);
-                float panicYaw = perfectYaw + ((random.NextSingle() * (inaccuracyScale * 2)) - inaccuracyScale);
-                float panicPitch = perfectPitch + ((random.NextSingle() * (inaccuracyScale * 2)) - inaccuracyScale);
-
-                var newAngles = new QAngle(panicPitch, panicYaw, 0);
                 
-                // THE FIX: Pass NULL to position and velocity. 
-                // This updates their aim instantly without killing their momentum!
-                botPawn.Teleport(null, newAngles, null);
+                if (bot == null || !bot.IsValid || !bot.PawnIsAlive) continue;
+                
+                var botPawn = bot.PlayerPawn.Value;
+                if (botPawn?.MovementServices == null) continue;
 
-                if (botPawn.MovementServices != null)
+                // 1. INJECT MOVEMENT
+                if (memory.CurrentMovementMask != 0)
                 {
-                    botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
-                    
-                    AddTimer(0.05f, () => 
-                    { 
-                        if (bot.IsValid && bot.PlayerPawn.Value?.MovementServices != null)
-                        {
-                            bot.PlayerPawn.Value.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack; 
-                        }
-                    });
+                    botPawn.MovementServices.Buttons.ButtonStates[0] &= ~((ulong)PlayerButtons.Forward | (ulong)PlayerButtons.Back | (ulong)PlayerButtons.Moveleft | (ulong)PlayerButtons.Moveright | (ulong)PlayerButtons.Jump | (ulong)PlayerButtons.Duck);
+                    botPawn.MovementServices.Buttons.ButtonStates[0] |= memory.CurrentMovementMask;
                 }
-            });
+
+                // 2. FLUID AIM INTERPOLATION
+                if (memory.CurrentTarget != null && memory.CurrentTarget.IsValid && memory.CurrentTarget.PawnIsAlive)
+                {
+                    // Human reaction delay: Don't start tracking perfectly until 150ms after spotting them
+                    if (currentTime < memory.TargetAcquiredTime + 0.15f) continue;
+
+                    var targetPawn = memory.CurrentTarget.PlayerPawn.Value;
+                    if (targetPawn == null) continue;
+
+                    var botPos = botPawn.AbsOrigin;
+                    var targetPos = targetPawn.AbsOrigin;
+                    var botAngles = botPawn.EyeAngles;
+
+                    if (botPos == null || targetPos == null || botAngles == null) continue;
+
+                    // Calculate perfect angles to the target's upper chest
+                    float deltaX = targetPos.X - botPos.X;
+                    float deltaY = targetPos.Y - botPos.Y;
+                    float deltaZ = (targetPos.Z + 45.0f) - (botPos.Z + 45.0f); 
+
+                    float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
+                    float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
+
+                    // LERP (Interpolate) the current view angles smoothly toward the perfect angles
+                    float currentYaw = botAngles.Y;
+                    float currentPitch = botAngles.X;
+
+                    float newYaw = currentYaw + NormalizeAngle(perfectYaw - currentYaw) * memory.CurrentAimSpeed;
+                    float newPitch = currentPitch + NormalizeAngle(perfectPitch - currentPitch) * memory.CurrentAimSpeed;
+
+                    // Apply the new smoothly dragged angles (passing null for pos/vel preserves hoppy momentum!)
+                    var smoothedAngles = new QAngle(newPitch, newYaw, 0);
+                    botPawn.Teleport(null, smoothedAngles, null);
+
+                    // 3. CROSSHAIR-TRIGGERED FIRING
+                    // Instead of a timer, we actively check if the crosshair has swept over the target.
+                    float distance = (botPos - targetPos).Length();
+                    float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
+                    float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
+
+                    // If within Zeus range AND the crosshair is within 5 degrees of the target's center...
+                    if (distance <= 170.0f && yawDiff < 5.0f && pitchDiff < 5.0f)
+                    {
+                        // Pull the trigger!
+                        botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
+                    }
+                    else
+                    {
+                        // Release the trigger
+                        botPawn.MovementServices.Buttons.ButtonStates[0] &= ~(ulong)PlayerButtons.Attack;
+                    }
+                }
+            }
         }
 
-        // ... [GetHighestPriorityTarget, EnsureBotHasAndHoldsZeus, DotProduct, etc. remain identical to the previous version]
-        
+        // Helper to ensure angles wrap correctly (-180 to 180) for shortest-path mouse swiping
+        private float NormalizeAngle(float angle)
+        {
+            while (angle > 180) angle -= 360;
+            while (angle < -180) angle += 360;
+            return angle;
+        }
+
+        // ... [GetHighestPriorityTarget, EnsureBotHasAndHoldsZeus, etc. remain here]
+
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
         {
             var weaponServices = botPawn.WeaponServices;
@@ -361,7 +362,7 @@ namespace ZeusBotAI
             brainTimer?.Kill();
             brainTimer = null;
             botMemory.Clear();
-            RemoveListener<Listeners.OnTick>(InjectMovementPhysics);
+            RemoveListener<Listeners.OnTick>(InjectPhysicsAndAim);
         }
     }
 }
