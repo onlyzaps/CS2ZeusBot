@@ -1,6 +1,5 @@
 using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
-using CounterStrikeSharp.API.Modules.Timers;
 using CounterStrikeSharp.API.Modules.Utils;
 using System;
 using System.Collections.Generic;
@@ -9,51 +8,9 @@ using System.Linq;
 namespace ZeusBotAI
 {
     #region GOAP Core & Enums
-    public enum StateKey
-    {
-        TargetDead,
-        HasTarget,
-        TargetInZeusRange,
-        TargetInKnifeRange,
-        HasZeus,
-        IsSafe,
-        WeaponEquipped
-    }
-
-    public class GoapState
-    {
-        public Dictionary<StateKey, bool> Values { get; set; } = new Dictionary<StateKey, bool>();
-
-        public GoapState Clone()
-        {
-            var clone = new GoapState();
-            foreach (var kvp in Values) clone.Values[kvp.Key] = kvp.Value;
-            return clone;
-        }
-
-        public bool Matches(GoapState requirements)
-        {
-            foreach (var req in requirements.Values)
-            {
-                if (!Values.ContainsKey(req.Key) || Values[req.Key] != req.Value)
-                    return false;
-            }
-            return true;
-        }
-
-        public void Apply(GoapState effects)
-        {
-            foreach (var eff in effects.Values) Values[eff.Key] = eff.Value;
-        }
-    }
 
     public abstract class GoapAction
     {
-        public string Name { get; protected set; } = "BaseAction";
-        public float Cost { get; protected set; } = 1.0f;
-        public GoapState Preconditions { get; } = new GoapState();
-        public GoapState Effects { get; } = new GoapState();
-
         public virtual bool CheckContextPrecondition(BotAgent agent) => true;
         public virtual bool IsValid(BotAgent agent) => true;
         public abstract bool IsDone(BotAgent agent);
@@ -64,10 +21,7 @@ namespace ZeusBotAI
 
     public abstract class GoapGoal
     {
-        public string Name { get; protected set; } = "BaseGoal";
-        public int Priority { get; protected set; }
-        public GoapState DesiredState { get; } = new GoapState();
-        public virtual int GetPriority(BotAgent agent) => Priority;
+        public abstract int GetPriority(BotAgent agent);
     }
     #endregion
 
@@ -124,10 +78,7 @@ namespace ZeusBotAI
         public float ActionCooldown = 0f;
         
         // Navigation & Traversal
-        public Vector Waypoint = new Vector(0,0,0);
         public float JumpCooldown = 0f;
-        public float LastZ = 0f;
-        public int StuckTicks = 0;
 
         // Combat Engine
         public float NextStateTime = 0f;
@@ -238,31 +189,7 @@ namespace ZeusBotAI
             CurrentAction = null;
         }
 
-        public GoapState GetWorldState()
-        {
-            var state = new GoapState();
-            state.Values[StateKey.TargetDead] = Blackboard.CurrentTargetFact == null;
-            state.Values[StateKey.HasTarget] = Blackboard.CurrentTargetFact != null;
-            state.Values[StateKey.IsSafe] = Blackboard.FearTimer < Server.CurrentTime;
-
-            if (Blackboard.CurrentTargetFact != null)
-            {
-                float dist = (Pawn.AbsOrigin! - Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-                // If threat is low (we haven't seen them yet), we act like we aren't in range 
-                // so we use Traversal instead of Approach.
-                bool activeCombat = Blackboard.CurrentTargetFact.ThreatLevel > 100f;
-                
-                state.Values[StateKey.TargetInZeusRange] = activeCombat && dist < 220f;
-                state.Values[StateKey.TargetInKnifeRange] = activeCombat && dist < 70f;
-            }
-            
-            state.Values[StateKey.HasZeus] = HasWeapon("taser");
-            state.Values[StateKey.WeaponEquipped] = true;
-
-            return state;
-        }
-
-        private bool HasWeapon(string name)
+        public bool HasWeapon(string name)
         {
             if (Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in Pawn.WeaponServices.MyWeapons)
@@ -283,25 +210,16 @@ namespace ZeusBotAI
 
     public class GoalKillEnemy : GoapGoal
     {
-        public GoalKillEnemy() { Name = "Kill Enemy"; Priority = 50; DesiredState.Values[StateKey.TargetDead] = true; }
         public override int GetPriority(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null ? 80 : 10;
     }
 
     public class GoalSurvive : GoapGoal
     {
-        public GoalSurvive() { Name = "Survive"; Priority = 100; DesiredState.Values[StateKey.IsSafe] = true; }
         public override int GetPriority(BotAgent agent) => agent.Blackboard.FearTimer >= Server.CurrentTime ? 100 : 0;
     }
 
     public class ActionEquipZeus : GoapAction
     {
-        public ActionEquipZeus()
-        {
-            Name = "Equip Zeus";
-            Preconditions.Values[StateKey.HasZeus] = true;
-            Effects.Values[StateKey.WeaponEquipped] = true;
-            Cost = 1f;
-        }
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
@@ -339,12 +257,6 @@ namespace ZeusBotAI
 
     public class ActionEquipKnife : GoapAction
     {
-        public ActionEquipKnife()
-        {
-            Name = "Equip Knife";
-            Effects.Values[StateKey.WeaponEquipped] = true;
-            Cost = 1f;
-        }
         public override bool IsDone(BotAgent agent)
         {
             var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
@@ -382,14 +294,6 @@ namespace ZeusBotAI
     // NEW: Clean Map Traversal (Sprinting out of spawn normally)
     public class ActionTraverseMap : GoapAction
     {
-        public ActionTraverseMap()
-        {
-            Name = "Traverse Map";
-            Preconditions.Values[StateKey.HasTarget] = true;
-            // Satisfies being in range which hands it off to ApproachTarget when close
-            Effects.Values[StateKey.TargetInZeusRange] = true; 
-        }
-
         public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         
         public override bool IsDone(BotAgent agent)
@@ -414,13 +318,6 @@ namespace ZeusBotAI
     // Heavy Combat Approaching (B-hops and dodging)
     public class ActionApproachTarget : GoapAction
     {
-        public ActionApproachTarget()
-        {
-            Name = "Combat Approach";
-            Preconditions.Values[StateKey.HasTarget] = true;
-            Effects.Values[StateKey.TargetInZeusRange] = true;
-        }
-
         public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         
         public override bool IsDone(BotAgent agent) 
@@ -428,7 +325,7 @@ namespace ZeusBotAI
             // Instantly abort and give back control to Native CS2 AI if threat drops (target dipped behind corner or retreated)
             if (agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.CurrentTargetFact.ThreatLevel < 100f) return true;
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
-            bool hasZeus = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
+            bool hasZeus = agent.HasWeapon("taser");
             var activeWep = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
             bool holdsKnife = activeWep != null && activeWep.DesignerName.Contains("knife");
 
@@ -509,13 +406,6 @@ namespace ZeusBotAI
 
     public class ActionEvasiveRetreat : GoapAction
     {
-        public ActionEvasiveRetreat()
-        {
-            Name = "Retreat";
-            Preconditions.Values[StateKey.IsSafe] = false;
-            Effects.Values[StateKey.IsSafe] = true;
-            Cost = 1f;
-        }
         public override bool IsDone(BotAgent agent) => agent.Blackboard.FearTimer < Server.CurrentTime;
         public override void Execute(BotAgent agent, float dt)
         {
@@ -543,14 +433,6 @@ namespace ZeusBotAI
 
     public class ActionEngageZeus : GoapAction
     {
-        public ActionEngageZeus()
-        {
-            Name = "Kill with Zeus";
-            Preconditions.Values[StateKey.TargetInZeusRange] = true;
-            Preconditions.Values[StateKey.HasZeus] = true;
-            Effects.Values[StateKey.TargetDead] = true;
-        }
-        
         public override bool CheckContextPrecondition(BotAgent agent) => true;
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         public override bool IsDone(BotAgent agent) 
@@ -619,14 +501,6 @@ namespace ZeusBotAI
 
     public class ActionEngageKnife : GoapAction
     {
-        public ActionEngageKnife()
-        {
-            Name = "Kill with Knife";
-            Preconditions.Values[StateKey.TargetInKnifeRange] = true;
-            Preconditions.Values[StateKey.WeaponEquipped] = true;
-            Effects.Values[StateKey.TargetDead] = true;
-            Cost = 2f; 
-        }
         public override bool CheckContextPrecondition(BotAgent agent) => true;
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         public override bool IsDone(BotAgent agent) 
@@ -660,7 +534,7 @@ namespace ZeusBotAI
 
     public class GoapPlanner
     {
-        public Queue<GoapAction> Plan(BotAgent agent, GoapGoal goal, GoapState startState)
+        public Queue<GoapAction> Plan(BotAgent agent, GoapGoal goal)
         {
             var usableActions = agent.AvailableActions.Where(a => a.CheckContextPrecondition(agent)).ToList();
             List<GoapAction> plan = new List<GoapAction>();
@@ -682,7 +556,7 @@ namespace ZeusBotAI
                     inActiveCombat = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f;
                 }
 
-                bool hasZeus = startState.Values.GetValueOrDefault(StateKey.HasZeus, false);
+                bool hasZeus = agent.HasWeapon("taser");
 
                 if (!inActiveCombat)
                 {
@@ -885,8 +759,7 @@ namespace ZeusBotAI
                 var topGoal = agent.Goals.OrderByDescending(g => g.GetPriority(agent)).First();
                 if (topGoal.GetPriority(agent) > 0)
                 {
-                    var state = agent.GetWorldState();
-                    agent.CurrentPlan = planner.Plan(agent, topGoal, state);
+                    agent.CurrentPlan = planner.Plan(agent, topGoal);
                 }
             }
 
