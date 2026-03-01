@@ -126,6 +126,13 @@ namespace ZeusBotAI
         public float FearTimer = 0f;
         public float ActionCooldown = 0f;
         public List<Vector> NearbyAllies = new List<Vector>();
+        
+        // Advanced Movement State Machine
+        public float NextStateTime = 0f;
+        public int MovePattern = 0; 
+        public float StrafeDir = 1f;
+        public float JumpCooldown = 0f;
+        public int BhopCount = 0;
     }
 
     public class BotAgent
@@ -255,7 +262,8 @@ namespace ZeusBotAI
                 if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains(name))
                 {
                     // If it's the taser, ensure it's not empty/recharging to stop infinite switching loops
-                    if (name == "taser" && weapon.Clip1 <= 0) return false;
+                    // In CS2, a discharged Zeus's clip drops to 0 while it recharges, or if it isn't rechargeable.
+                    if (name.Contains("taser") && weapon.Clip1 <= 0) return false;
                     return true;
                 }
             }
@@ -359,8 +367,25 @@ namespace ZeusBotAI
         {
             if (agent.Blackboard.CurrentTargetFact != null)
             {
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!); 
-                agent.Blackboard.DesiredSpeed = 250f;
+                Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+                Vector myPos = agent.Pawn.AbsOrigin!;
+                Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+                Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+
+                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+                float currentTime = Server.CurrentTime;
+
+                // Random hop right-click
+                if (isGrounded && agent.Blackboard.JumpCooldown < currentTime && Math.Sin(currentTime * 10f) > 0.6f)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    agent.Blackboard.JumpCooldown = currentTime + 0.6f;
+                }
+                
+                // Add evasive strafe so it's not a perfect line
+                float erraticSine = (float)Math.Sin(currentTime * 20f);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 2.0f) + (rightDir * Math.Sign(erraticSine) * 0.5f)); 
+                agent.Blackboard.DesiredSpeed = 260f;
             }
             if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
             {
@@ -452,11 +477,45 @@ namespace ZeusBotAI
         {
             if (agent.Blackboard.CurrentTargetFact != null)
             {
-                Vector dirAway = MathUtils.NormalizeVector(agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition);
-                // Dynamic, unpredictable evasion
-                float dodgeSine = (float)Math.Sin(Server.CurrentTime * 7f + agent.Controller.Index);
-                Vector strafe = new Vector(-dirAway.Y, dirAway.X, 0) * Math.Sign(dodgeSine); 
+                Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+                Vector myPos = agent.Pawn.AbsOrigin!;
+                Vector dirAway = MathUtils.NormalizeVector(myPos - targetPos);
+                Vector rightDir = new Vector(-dirAway.Y, dirAway.X, 0);
+
+                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+                float currentTime = Server.CurrentTime;
+
+                if (currentTime > agent.Blackboard.NextStateTime)
+                {
+                    Random r = new Random();
+                    agent.Blackboard.MovePattern = r.Next(0, 3);
+                    agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 0.8 + 0.3);
+                    agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
+                }
+
+                Vector intendedMvmt = new Vector(0,0,0);
                 
+                if (agent.Blackboard.MovePattern == 0) // Air dodge retreat
+                {
+                    if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
+                    {
+                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                        agent.Blackboard.JumpCooldown = currentTime + 0.5f;
+                    }
+                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 1.5f));
+                    if (!isGrounded) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck; // tuck legs to lower hitbox
+                }
+                else if (agent.Blackboard.MovePattern == 1) // ZigZag fast retreat
+                {
+                    float erraticSine = (float)Math.Sin(currentTime * 15f + agent.Controller.Index);
+                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 1.5f) + (rightDir * Math.Sign(erraticSine)));
+                }
+                else // Slide retreat
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                    intendedMvmt = MathUtils.NormalizeVector((dirAway * 0.5f) + (rightDir * agent.Blackboard.StrafeDir * 1.2f));
+                }
+
                 // Keep away from allies to avoid easy collaterals/grouping
                 Vector separation = new Vector(0,0,0);
                 foreach (var allyPos in agent.Blackboard.NearbyAllies)
@@ -466,12 +525,8 @@ namespace ZeusBotAI
                         separation += MathUtils.NormalizeVector(repulse) * 2f;
                 }
                 
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirAway * 0.5f) + strafe + separation);
-                agent.Blackboard.DesiredSpeed = 250f;
-                
-                // Advanced duck/jump matrix based on frame times
-                if (dodgeSine > 0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-                else if (dodgeSine < -0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(intendedMvmt + separation);
+                agent.Blackboard.DesiredSpeed = 260f; // flee fast!
             }
         }
     }
@@ -498,38 +553,84 @@ namespace ZeusBotAI
             Vector myPos = agent.Pawn.AbsOrigin!;
             float dist = (myPos - targetPos).Length();
             Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-            
-            // Unpredictable approach
-            float dodgeSine = (float)Math.Sin(Server.CurrentTime * 4f + agent.Controller.Index);
-            Vector strafe = new Vector(-dirToTarget.Y, dirToTarget.X, 0) * dodgeSine;
+            Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
 
-            // Group flanking/spacing: push away from allies
+            bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+            float currentTime = Server.CurrentTime;
+
+            if (currentTime > agent.Blackboard.NextStateTime)
+            {
+                Random r = new Random();
+                int patternCount = dist > 300f ? 3 : 2;
+                agent.Blackboard.MovePattern = r.Next(0, patternCount);
+                agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 1.2 + 0.5);
+                agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
+                agent.Blackboard.BhopCount = r.Next(2, 5);
+            }
+
+            Vector intendedMvmt = new Vector(0,0,0);
+            float speed = 250f;
+
+            if (agent.Blackboard.MovePattern == 1 && agent.Blackboard.BhopCount > 0)
+            {
+                // B-hopping logic
+                if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    agent.Blackboard.JumpCooldown = currentTime + 0.3f;
+                    agent.Blackboard.BhopCount--;
+                    agent.Blackboard.StrafeDir *= -1f; 
+                }
+                
+                if (!isGrounded)
+                {
+                    intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 0.7f));
+                    speed = 280f; // Extra speed while bhoping
+                }
+                else
+                {
+                    intendedMvmt = dirToTarget;
+                }
+            }
+            else if (agent.Blackboard.MovePattern == 2)
+            {
+                // Wide Air-strafe dodge
+                if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    agent.Blackboard.JumpCooldown = currentTime + 0.6f;
+                }
+                float wideWeight = isGrounded ? 0.3f : 1.5f; 
+                intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.6f) + (rightDir * agent.Blackboard.StrafeDir * wideWeight));
+                
+                if (!isGrounded && Math.Sin(currentTime * 10f) > 0) 
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                }
+            }
+            else 
+            {
+                // Fast push / Jitter
+                float jitter = (float)Math.Sin(currentTime * 12f + agent.Controller.Index);
+                if (Math.Abs(jitter) > 0.8f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
+                
+                intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
+                if (jitter > 0.9f && dist < 500f)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                }
+            }
+
             Vector separation = new Vector(0,0,0);
             foreach (var allyPos in agent.Blackboard.NearbyAllies)
             {
                 Vector repulse = myPos - allyPos;
                 if (repulse.Length() < 200f)
-                    separation += MathUtils.NormalizeVector(repulse) * 1.5f;
+                    separation += MathUtils.NormalizeVector(repulse) * (isGrounded ? 1.5f : 0.5f);
             }
 
-            // High pressure movement: they barrel forward but their path wiggles side to side
-            float forwardWeight = (dist < 400f) ? 1.3f : 1.6f;
-
-            agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * forwardWeight) + strafe + separation);
-            agent.Blackboard.DesiredSpeed = 250f;
-            
-            // Unpredictable movement execution: add bunny hops, wide crouches, and jiggles
-            float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 3f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
-            if (dist < 800f && dist > 120f && randomJumpChance > 0.35f) 
-            {
-                // Bhop spacing
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
-            }
-            else if (dist < 400f && Math.Abs(dodgeSine) > 0.75f) 
-            {
-                // High level crouch-peeking / dodging
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
-            }
+            agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(intendedMvmt + separation);
+            agent.Blackboard.DesiredSpeed = speed;
         }
     }
 
@@ -565,35 +666,74 @@ namespace ZeusBotAI
         {
             if (agent.Blackboard.CurrentTargetFact != null)
             {
-                // Level 9 Faceit movement: very erratic, ADAD spam, mixed with fast forward pushing
-                agent.Blackboard.DesiredSpeed = 250f; // Max velocity for strafing
-                Vector dirToTarget = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
-                float distToTarget = (agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!).Length();
+                Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+                Vector myPos = agent.Pawn.AbsOrigin!;
+                float distToTarget = (targetPos - myPos).Length();
+                Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+                Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
 
-                // Generate extremely erratic ADAD strafe intervals 
-                // Uses a highly volatile sine wave combination specifically scaled to frame time
-                float erraticSine = (float)(Math.Sin(Server.CurrentTime * 14f + agent.Controller.Index) + Math.Sin(Server.CurrentTime * 23f));
-                float strafeVal = Math.Sign(erraticSine); // Hard left or hard right, no in-between
+                bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
+                float currentTime = Server.CurrentTime;
 
-                // Occasional ducking when perfectly in range to dodge pre-fired headshots
-                if (distToTarget < 160f && erraticSine > 1.5f)
+                if (currentTime > agent.Blackboard.NextStateTime)
                 {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                    Random r = new Random();
+                    agent.Blackboard.MovePattern = r.Next(0, 3);
+                    agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 0.8 + 0.3);
+                    agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
                 }
 
-                // If perfectly in range, mix aggressive wide strafing with slight forward pressure. If slightly far, push forward while wiggle-strafing.
-                if (distToTarget < 170f) 
+                float speed = 250f;
+                Vector intendedMvmt = new Vector(0,0,0);
+
+                if (agent.Blackboard.MovePattern == 2)
                 {
-                    agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.2f) + (new Vector(-dirToTarget.Y, dirToTarget.X, 0) * strafeVal));
+                    // Full jump peek / Air strafe dodging
+                    if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
+                    {
+                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                        agent.Blackboard.JumpCooldown = currentTime + 0.5f;
+                    }
+                    if (!isGrounded)
+                    {
+                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.2f) + (rightDir * agent.Blackboard.StrafeDir * 1.5f));
+                        speed = 280f;
+                    }
+                    else
+                    {
+                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 1.2f) + (rightDir * agent.Blackboard.StrafeDir * 0.5f));
+                    }
+                }
+                else if (agent.Blackboard.MovePattern == 1)
+                {
+                    // Crouch approaching
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                    intendedMvmt = MathUtils.NormalizeVector(dirToTarget + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
                 }
                 else
                 {
-                    agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToTarget + (new Vector(-dirToTarget.Y, dirToTarget.X, 0) * (strafeVal * 0.4f)));
+                    // Hard ADAD Spam
+                    float erraticSine = (float)Math.Sin(currentTime * 20f + agent.Controller.Index);
+                    float strafeVal = Math.Sign(erraticSine);
+                    
+                    if (distToTarget < 160f)
+                    {
+                        if (erraticSine > 0.8f) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.1f) + (rightDir * strafeVal));
+                    }
+                    else
+                    {
+                        intendedMvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * strafeVal * 1.2f));
+                    }
                 }
                 
+                agent.Blackboard.DesiredMoveDirection = intendedMvmt;
+                agent.Blackboard.DesiredSpeed = speed;
+                
                 // Track aim precisely (upper chest center mass)
-                Vector botHead = new Vector(agent.Pawn.AbsOrigin!.X, agent.Pawn.AbsOrigin!.Y, agent.Pawn.AbsOrigin!.Z + 64f);
-                Vector enemyChest = new Vector(agent.Blackboard.CurrentTargetFact.LastKnownPosition.X, agent.Blackboard.CurrentTargetFact.LastKnownPosition.Y, agent.Blackboard.CurrentTargetFact.LastKnownPosition.Z + 40f);
+                float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; // crouch flag 
+                Vector botHead = new Vector(myPos.X, myPos.Y, myPos.Z + eyeHeight);
+                Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 40f);
                 Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
                 Vector currentForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
                 
@@ -755,6 +895,29 @@ namespace ZeusBotAI
                     {
                         controller.PlayerName = desiredName;
                         Utilities.SetStateChanged(controller, "CBasePlayerController", "m_iszPlayerName");
+                        
+                        // Force give the taser if they don't have it on spawn to fix the "perpetual knife" glitch
+                        var pawn = controller.PlayerPawn.Value;
+                        if (pawn != null && pawn.IsValid)
+                        {
+                            bool hasZeus = false;
+                            if (pawn.WeaponServices?.MyWeapons != null)
+                            {
+                                foreach (var w in pawn.WeaponServices.MyWeapons)
+                                {
+                                    if (w.Value != null && w.Value.DesignerName != null && w.Value.DesignerName.Contains("taser"))
+                                    {
+                                        hasZeus = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (!hasZeus)
+                            {
+                                controller.GiveNamedItem("weapon_taser");
+                            }
+                        }
                     }
                 });
             }
