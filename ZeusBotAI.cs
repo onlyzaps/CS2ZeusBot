@@ -10,8 +10,8 @@ namespace ZeusBotAI
 {
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI";
-        public override string ModuleVersion => "1.3.1";
+        public override string ModuleName => "Zeus Bot AI (Threat Matrix Integration)";
+        public override string ModuleVersion => "1.3.0";
         private CounterStrikeSharp.API.Modules.Timers.Timer? botAiTimer;
         
         // Tracks which bots are currently "reacting" so we don't spam timers on them
