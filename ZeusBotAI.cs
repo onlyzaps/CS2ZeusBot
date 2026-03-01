@@ -26,7 +26,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Context Steering & Pro Sweeps)";
-        public override string ModuleVersion => "8.1.2";
+        public override string ModuleVersion => "8.2.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -36,7 +36,7 @@ namespace ZeusBotAI
         {
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v8.1 Pro Context Steering loaded (Enhanced Bhopping & Air Strafing).");
+            Console.WriteLine("[Zeus Bot AI] v8.2 Pro Context Steering loaded (Safe Bhopping & Anti-Clump).");
         }
 
         private void ProcessBotBrains()
@@ -90,6 +90,24 @@ namespace ZeusBotAI
 
                 if (botPos != null)
                 {
+                    // 1. Repel from other bots (Allies) to prevent clumping
+                    foreach (var otherBot in bots)
+                    {
+                        if (otherBot == bot) continue; 
+                        var otherBotPawn = otherBot.PlayerPawn.Value;
+                        if (otherBotPawn == null || otherBotPawn.AbsOrigin == null) continue;
+
+                        float distToAlly = (botPos - otherBotPawn.AbsOrigin).Length();
+                        if (distToAlly < 250.0f)
+                        {
+                            Vector dirAway = GetNormalizedVector(otherBotPawn.AbsOrigin, botPos);
+                            float weight = (float)Math.Pow(1.0f - (distToAlly / 250.0f), 2.0) * 1.5f; 
+                            totalRepulsion.X += dirAway.X * weight;
+                            totalRepulsion.Y += dirAway.Y * weight;
+                        }
+                    }
+
+                    // 2. Repel from secondary enemies
                     foreach (var enemy in aliveEnemies)
                     {
                         if (enemy == target) continue; 
@@ -202,7 +220,7 @@ namespace ZeusBotAI
                             }
                             else
                             {
-                                memory.JumpCooldown = currentTime + 0.3f; // Short cooldown to allow immediate jump on landing
+                                memory.JumpCooldown = currentTime + 0.4f; // Strict 0.4s cooldown per jump
                             }
 
                             memory.DuckReleaseTime = currentTime + 0.5f; 
