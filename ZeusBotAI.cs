@@ -527,11 +527,12 @@ namespace ZeusBotAI
             Cost = 2f;
         }
         
-        private Vector? ambushSpot = null;
+        private Vector ambushSpot = new Vector(0,0,0);
+        private bool hasAmbushSpot = false;
 
         public override void OnEnter(BotAgent agent)
         {
-            ambushSpot = null;
+            hasAmbushSpot = false;
         }
 
         public override bool IsDone(BotAgent agent)
@@ -551,7 +552,7 @@ namespace ZeusBotAI
             
             agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Speed; // SHIFT key / walk
             
-            if (ambushSpot == null)
+            if (!hasAmbushSpot)
             {
                 Vector toEnemy = MathUtils.NormalizeVector(target.LastKnownPosition - myPos);
                 Vector enemyDir = MathUtils.NormalizeVector(target.PredictedVelocity);
@@ -568,10 +569,11 @@ namespace ZeusBotAI
                 
                 // Hide slightly off the path where the enemy is going
                 ambushSpot = target.LastKnownPosition + chosenPerpendicular * 200f - enemyDir * 100f;
+                hasAmbushSpot = true;
             }
 
-            Vector toSpot = MathUtils.NormalizeVector(ambushSpot.Value - myPos);
-            float distToSpot = (ambushSpot.Value - myPos).Length();
+            Vector toSpot = MathUtils.NormalizeVector(ambushSpot - myPos);
+            float distToSpot = (ambushSpot - myPos).Length();
 
             if (distToSpot > 50f)
             {
@@ -795,7 +797,7 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.4";
+        public override string ModuleVersion => "2.0.3";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
