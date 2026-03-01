@@ -99,9 +99,16 @@ namespace ZeusBotAI
             var keys = Facts.Keys.ToList();
             foreach (var key in keys)
             {
+                var fact = Facts[key];
+                if (fact.Subject == null || !fact.Subject.IsValid || !fact.Subject.PawnIsAlive)
+                {
+                    Facts.Remove(key);
+                    continue; // Forget immediately if dead
+                }
+
                 // Decay confidence over time when out of sight
-                Facts[key].Confidence -= deltaTime * 0.05f; 
-                if (Facts[key].Confidence <= 0)
+                fact.Confidence -= deltaTime * 0.05f; 
+                if (fact.Confidence <= 0)
                 {
                     Facts.Remove(key); // Forget target
                 }
@@ -244,7 +251,13 @@ namespace ZeusBotAI
             if (Pawn?.WeaponServices?.MyWeapons == null) return false;
             foreach (var w in Pawn.WeaponServices.MyWeapons)
             {
-                if (w.Value != null && w.Value.DesignerName.Contains(name)) return true;
+                var weapon = w.Value;
+                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains(name))
+                {
+                    // If it's the taser, ensure it's not empty/recharging to stop infinite switching loops
+                    if (name == "taser" && weapon.Clip1 <= 0) return false;
+                    return true;
+                }
             }
             return false;
         }
@@ -332,16 +345,28 @@ namespace ZeusBotAI
             Cost = 2f; 
         }
         
-        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
+        public override bool CheckContextPrecondition(BotAgent agent) => true;
         
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
-        public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime;
+        public override bool IsDone(BotAgent agent) 
+        {
+            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
+            return dist > 85f; // Abort if target escapes knife range
+        }
         
         public override void Execute(BotAgent agent, float dt)
         {
-            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); 
-            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
-            agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.8f;
+            if (agent.Blackboard.CurrentTargetFact != null)
+            {
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!); 
+                agent.Blackboard.DesiredSpeed = 250f;
+            }
+            if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+            {
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; 
+                agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.8f;
+            }
         }
     }
 
@@ -356,9 +381,9 @@ namespace ZeusBotAI
             Cost = 3f; 
         }
         
-        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
+        public override bool CheckContextPrecondition(BotAgent agent) => true;
 
-        public override bool IsDone(BotAgent agent) => agent.Blackboard.ActionCooldown > Server.CurrentTime || !HasWeapon(agent, "hegrenade");
+        public override bool IsDone(BotAgent agent) => !HasWeapon(agent, "hegrenade");
 
         public override void Execute(BotAgent agent, float dt)
         {
@@ -382,8 +407,11 @@ namespace ZeusBotAI
             }
             else
             {
-                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
-                agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f; // Triggers done state and puts on cooldown
+                if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f; // Triggers done state and puts on cooldown
+                }
             }
         }
         
@@ -491,13 +519,13 @@ namespace ZeusBotAI
             agent.Blackboard.DesiredSpeed = 250f;
             
             // Unpredictable movement execution: add bunny hops, wide crouches, and jiggles
-            float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 1.5f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
-            if (dist < 500f && dist > 200f && randomJumpChance > 0.8f) 
+            float randomJumpChance = (float)(Math.Sin(Server.CurrentTime * 3f + agent.Controller.Index) * Math.Sin(Server.CurrentTime * 8f));
+            if (dist < 800f && dist > 120f && randomJumpChance > 0.35f) 
             {
                 // Bhop spacing
                 agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
             }
-            else if (dist < 300f && Math.Abs(dodgeSine) > 0.9f) 
+            else if (dist < 400f && Math.Abs(dodgeSine) > 0.75f) 
             {
                 // High level crouch-peeking / dodging
                 agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
@@ -515,7 +543,7 @@ namespace ZeusBotAI
             Effects.Values[StateKey.TargetDead] = true;
         }
         
-        public override bool CheckContextPrecondition(BotAgent agent) => agent.Blackboard.ActionCooldown <= Server.CurrentTime;
+        public override bool CheckContextPrecondition(BotAgent agent) => true;
         
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         
@@ -523,7 +551,6 @@ namespace ZeusBotAI
         public override bool IsDone(BotAgent agent) 
         {
             if (agent.Blackboard.CurrentTargetFact == null) return true;
-            if (agent.Blackboard.ActionCooldown > Server.CurrentTime) return true; // Just fired, done for now to let planner loop
 
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             return dist > 210f; // Target escaped Zeus range, abort engagement
@@ -575,10 +602,13 @@ namespace ZeusBotAI
                 
                 // Allow them to "flick". If they aren't dead-on, they don't fire. 
                 // 0.985f is highly lethal but accounts for the heavy ADAD spam they are now doing
-                if (aimDot > 0.97f || (dist < 130f && aimDot > 0.90f)) 
+                if (aimDot > 0.95f || (dist < 150f && aimDot > 0.85f)) 
                 {
-                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
-                    agent.Blackboard.ActionCooldown = Server.CurrentTime + 1.0f; 
+                    if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
+                    {
+                        agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+                        agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.5f; 
+                    }
                 }
             }
         }
