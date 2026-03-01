@@ -885,7 +885,7 @@ namespace ZeusBotAI
         public override void Unload(bool hotReload)
         {
             RemoveListener<Listeners.OnTick>(OnTick);
-            RemoveEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
+            DeregisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
             agents.Clear();
         }
     }
