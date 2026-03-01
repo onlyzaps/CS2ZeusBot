@@ -238,6 +238,144 @@ namespace ZeusBotAIGoap
 
     #region Goals & Actions Implementation
 
+    public class ActionEquipZeus : GoapAction
+    {
+        public ActionEquipZeus()
+        {
+            Name = "Equip Zeus";
+            Preconditions.Values[StateKey.HasZeus] = true;
+            Effects.Values[StateKey.WeaponEquipped] = true;
+            Cost = 1f;
+        }
+
+        public override bool IsDone(BotAgent agent)
+        {
+            var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+            return activeWeapon != null && activeWeapon.DesignerName.Contains("taser");
+        }
+
+        public override void Execute(BotAgent agent, float dt)
+        {
+            var weaponServices = agent.Pawn?.WeaponServices;
+            if (weaponServices?.MyWeapons == null) return;
+
+            foreach (var weaponHandle in weaponServices.MyWeapons)
+            {
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                {
+                    weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
+                    Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
+                    break;
+                }
+            }
+        }
+    }
+
+    public class ActionEquipKnife : GoapAction
+    {
+        public ActionEquipKnife()
+        {
+            Name = "Equip Knife";
+            // No preconditions needed, bots always have a knife
+            Effects.Values[StateKey.WeaponEquipped] = true;
+            Cost = 1f;
+        }
+
+        public override bool IsDone(BotAgent agent)
+        {
+            var activeWeapon = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
+            return activeWeapon != null && activeWeapon.DesignerName.Contains("knife");
+        }
+
+        public override void Execute(BotAgent agent, float dt)
+        {
+            var weaponServices = agent.Pawn?.WeaponServices;
+            if (weaponServices?.MyWeapons == null) return;
+
+            foreach (var weaponHandle in weaponServices.MyWeapons)
+            {
+                var weapon = weaponHandle.Value;
+                if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("knife"))
+                {
+                    weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
+                    Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
+                    break;
+                }
+            }
+        }
+    }
+
+    public class ActionEngageKnife : GoapAction
+    {
+        public ActionEngageKnife()
+        {
+            Name = "Engage with Knife";
+            Preconditions.Values[StateKey.TargetInKnifeRange] = true;
+            Preconditions.Values[StateKey.WeaponEquipped] = true;
+            Effects.Values[StateKey.TargetDead] = true;
+            Cost = 2f; // Slightly higher cost than Zeus, so Zeus is preferred if both are in range
+        }
+        
+        public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
+        public override bool IsDone(BotAgent agent) => agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.ActionCooldown > Server.CurrentTime;
+        
+        public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 0.5f;
+        
+        public override void Execute(BotAgent agent, float dt)
+        {
+            agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0); // Stop moving to secure the stab
+            agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack2; // Right-click stab for maximum damage
+        }
+    }
+
+    public class ActionThrowNade : GoapAction
+    {
+        public ActionThrowNade()
+        {
+            Name = "Throw Nade";
+            Preconditions.Values[StateKey.HasNade] = true;
+            Preconditions.Values[StateKey.HasTarget] = true;
+            Effects.Values[StateKey.TargetDead] = true;
+            Cost = 3f; // Highest cost, making it a situational fallback
+        }
+
+        public override bool IsDone(BotAgent agent) => agent.Blackboard.ActionCooldown > Server.CurrentTime || !HasWeapon(agent, "hegrenade");
+
+        public override void OnEnter(BotAgent agent) => agent.Blackboard.ActionCooldown = Server.CurrentTime + 2.0f;
+
+        public override void Execute(BotAgent agent, float dt)
+        {
+            var weaponServices = agent.Pawn?.WeaponServices;
+            if (weaponServices?.MyWeapons == null) return;
+
+            var activeWeapon = weaponServices.ActiveWeapon.Value;
+            
+            // If the nade isn't in hands yet, equip it
+            if (activeWeapon == null || !activeWeapon.DesignerName.Contains("hegrenade"))
+            {
+                foreach (var weaponHandle in weaponServices.MyWeapons)
+                {
+                    var weapon = weaponHandle.Value;
+                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("hegrenade"))
+                    {
+                        weaponServices.ActiveWeapon.Raw = weaponHandle.Raw;
+                        Utilities.SetStateChanged(agent.Pawn!, "CBasePlayerPawn", "m_pWeaponServices");
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // Nade is in hands, pull the pin
+                agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Attack;
+            }
+        }
+        
+        private bool HasWeapon(BotAgent agent, string name)
+        {
+            if (agent.Pawn?.WeaponServices?.MyWeapons == null) return false;
+
     public class GoalKillEnemy : GoapGoal
     {
         public GoalKillEnemy() { Name = "Kill Enemy"; Priority = 50; DesiredState.Values[StateKey.TargetDead] = true; }
