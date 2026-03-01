@@ -795,7 +795,7 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (F.E.A.R. GOAP Architecture)";
-        public override string ModuleVersion => "2.0.3";
+        public override string ModuleVersion => "2.0.4";
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
