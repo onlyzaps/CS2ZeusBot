@@ -1048,7 +1048,7 @@ namespace ZeusBotAI
                 }
             }
             
-            Vector injectedVelocity = new Vector(dir.X * speed, dir.Y * speed, zVel
+            Vector injectedVelocity = new Vector(dir.X * speed, dir.Y * speed, zVel);
             QAngle outAngles = agent.Blackboard.CurrentTargetFact != null ? agent.Blackboard.DesiredAim : pawn.EyeAngles!;
             
             pawn.Teleport(null, outAngles, injectedVelocity);
