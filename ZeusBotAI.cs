@@ -44,7 +44,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v17.0.2 Classic Weapon Logic & Advanced Movement loaded.");
+            Console.WriteLine("[Zeus Bot AI] v17.0.3 Classic Weapon Logic & Advanced Movement loaded.");
         }
 
         private void ProcessBotBrains()
@@ -194,7 +194,7 @@ namespace ZeusBotAI
 
                     bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
                     
-                    // CLEAR BUTTONS: From WorkingBackup3 to cleanly prepare inputs
+                    // CLEAR BUTTONS: Cleanly prepare inputs
                     botPawn.MovementServices.Buttons.ButtonStates[0] = 0;
 
                     // --- AGGRESSION JUMPING ---
@@ -329,7 +329,6 @@ namespace ZeusBotAI
                     float zVelocity = currentVel.Z;
                     if (!isAirborne && zVelocity > 0) 
                     {
-                        // Nullify positive Z velocity when grounded to prevent physics feedback loops
                         zVelocity = 0; 
                     }
 
@@ -355,11 +354,10 @@ namespace ZeusBotAI
                     var smoothedAngles = new QAngle(newPitch, newYaw, 0);
                     botPawn.Teleport(null, smoothedAngles, injectedVelocity);
 
-                    // --- UPDATED FIRING LOGIC: ONLY SHOOT IN ZEUS RANGE (190 UNITS) ---
+                    // --- ONLY SHOOT IN ZEUS RANGE (190 UNITS) ---
                     float yawDiff = Math.Abs(NormalizeAngle(perfectYaw - newYaw));
                     float pitchDiff = Math.Abs(NormalizeAngle(perfectPitch - newPitch));
                     
-                    // distance <= 190.0f enforces maximum Zeus kill range
                     if (distance <= 190.0f && yawDiff < 15.0f && pitchDiff < 15.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
@@ -404,44 +402,42 @@ namespace ZeusBotAI
             return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
-        // --- UPDATED WEAPON LOGIC ---
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn, bool hasTarget, float distanceToTarget)
         {
             var weaponServices = botPawn.WeaponServices;
             if (weaponServices == null) return;
-
+        
             bool hasZeus = false;
             uint taserHandleRaw = 0;
-            bool isTaserReady = false;
-
+            uint knifeHandleRaw = 0;
+        
             if (weaponServices.MyWeapons != null)
             {
                 foreach (var weaponHandle in weaponServices.MyWeapons)
                 {
                     var weapon = weaponHandle.Value;
-                    if (weapon != null && weapon.DesignerName != null && weapon.DesignerName.Contains("taser"))
+                    if (weapon != null && weapon.DesignerName != null)
                     {
-                        hasZeus = true;
-                        taserHandleRaw = weaponHandle.Raw;
-                        
-                        // Allow the Zeus to recharge naturally. Only flag it as ready if it has ammo.
-                        if (weapon.Clip1 > 0)
+                        if (weapon.DesignerName.Contains("taser"))
                         {
-                            isTaserReady = true;
+                            hasZeus = true;
+                            taserHandleRaw = weaponHandle.Raw;
                         }
-                        break;
+                        else if (weapon.DesignerName.Contains("knife") || weapon.DesignerName.Contains("bayonet"))
+                        {
+                            knifeHandleRaw = weaponHandle.Raw;
+                        }
                     }
                 }
             }
-
+        
             if (!hasZeus)
             {
                 bot.GiveNamedItem("weapon_taser");
             }
             else 
             {
-                // Core fix: Only force swap if the Taser is loaded AND we aren't holding utility
-                if (hasTarget && distanceToTarget < 1200.0f && isTaserReady)
+                if (hasTarget && distanceToTarget < 1200.0f)
                 {
                     var activeWeapon = weaponServices.ActiveWeapon.Value;
                     if (activeWeapon != null && activeWeapon.DesignerName != null)
@@ -452,12 +448,27 @@ namespace ZeusBotAI
                                          activeWeapon.DesignerName.Contains("molotov") || 
                                          activeWeapon.DesignerName.Contains("incgrenade") || 
                                          activeWeapon.DesignerName.Contains("decoy");
-
-                        // Only force the taser if they aren't already holding it and aren't holding utility
-                        if (!activeWeapon.DesignerName.Contains("taser") && !isUtility)
+        
+                        if (!isUtility)
                         {
-                            weaponServices.ActiveWeapon.Raw = taserHandleRaw;
-                            Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                            // If far away, pull out the knife to close the gap faster
+                            if (distanceToTarget > 400.0f && knifeHandleRaw != 0)
+                            {
+                                if (!activeWeapon.DesignerName.Contains("knife") && !activeWeapon.DesignerName.Contains("bayonet"))
+                                {
+                                    weaponServices.ActiveWeapon.Raw = knifeHandleRaw;
+                                    Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                                }
+                            }
+                            // If getting close, pull out the Zeus to prepare for the kill
+                            else if (distanceToTarget <= 400.0f)
+                            {
+                                if (!activeWeapon.DesignerName.Contains("taser"))
+                                {
+                                    weaponServices.ActiveWeapon.Raw = taserHandleRaw;
+                                    Utilities.SetStateChanged(botPawn, "CBasePlayerPawn", "m_pWeaponServices");
+                                }
+                            }
                         }
                     }
                 }
