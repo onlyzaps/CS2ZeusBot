@@ -196,27 +196,38 @@ namespace ZeusBotAI
                     continue;
                 }
 
-                // Global Knowledge for Maximum Lethality (always track)
+                // Global Knowledge Tracker - keeps them moving across map
                 if (!Memory.Facts.ContainsKey(player.Index))
                     Memory.Facts[player.Index] = new Fact { Subject = player };
 
                 var fact = Memory.Facts[player.Index];
                 fact.LastKnownPosition = otherPos;
-                fact.Confidence = 1.0f; // Refresh confidence
-                
-                // Threat calculation - Dynamic prioritization
-                Vector enemyForward = MathUtils.GetForwardVector(otherPawn.EyeAngles!);
-                float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
-                fact.ThreatLevel = Math.Max(0, (5000f - dist) * 2f); // Distance is a huge factor
-                
-                if (enemyAimDot > 0.9f) fact.ThreatLevel += 3000f; // Aimed at!
-                if (dist < 300f) fact.ThreatLevel += 5000f; // Immediate combat priority
-                
-                // Trigger Interruption / Fear State if heavily threatened from afar
-                if (enemyAimDot > 0.95f && dist > 800f && Blackboard.FearTimer < currentTime)
+                fact.Confidence = 1.0f; 
+
+                // LOS Check for entering combat mode
+                float dot = MathUtils.DotProduct(myForward, dirToOther);
+                bool inFOV = dot > 0.4f;
+
+                if (inFOV || dist < 500f)
                 {
-                    Blackboard.FearTimer = currentTime + 0.8f;
-                    Interrupt("High Threat Detected - Evasive Retreat");
+                    // Combat Mode Threat Calculation
+                    Vector enemyForward = MathUtils.GetForwardVector(otherPawn.EyeAngles!);
+                    float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
+                    fact.ThreatLevel = Math.Max(0, (5000f - dist) * 2f); 
+                    
+                    if (enemyAimDot > 0.9f) fact.ThreatLevel += 3000f; 
+                    if (dist < 300f) fact.ThreatLevel += 5000f; 
+                    
+                    if (enemyAimDot > 0.95f && dist > 800f && Blackboard.FearTimer < currentTime)
+                    {
+                        Blackboard.FearTimer = currentTime + 0.8f;
+                        Interrupt("High Threat Detected - Evasive Retreat");
+                    }
+                }
+                else
+                {
+                    // Passthrough mode - just moving towards general area
+                    fact.ThreatLevel = 100f;
                 }
             }
         }
@@ -559,6 +570,16 @@ namespace ZeusBotAI
             float dist = (myPos - targetPos).Length();
             Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
             Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+
+            bool inCombatMode = dist < 800f && agent.Blackboard.CurrentTargetFact.ThreatLevel > 500f;
+
+            if (!inCombatMode)
+            {
+                // Calm approach: linear sprint to close distance without erratic jumping
+                agent.Blackboard.DesiredMoveDirection = dirToTarget;
+                agent.Blackboard.DesiredSpeed = 250f;
+                return;
+            }
 
             bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
             float currentTime = Server.CurrentTime;
@@ -1042,7 +1063,22 @@ namespace ZeusBotAI
             if ((agent.Blackboard.ButtonsToPress & (ulong)PlayerButtons.Jump) != 0)
             {
                 bool isGrounded = ((uint)pawn.Flags & 1) != 0;
-                if (isGrounded)
+                
+                // Cliff jump prevention: avoid yeeting off drops if the target is far and below us
+                bool safeToJump = true;
+                if (agent.Blackboard.CurrentTargetFact != null)
+                {
+                    Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
+                    float zDiff = pawn.AbsOrigin!.Z - targetPos.Z;
+                    float xyDist = (float)Math.Sqrt(Math.Pow(pawn.AbsOrigin.X - targetPos.X, 2) + Math.Pow(pawn.AbsOrigin.Y - targetPos.Y, 2));
+                    
+                    if (zDiff > 80f && xyDist > 200f) 
+                    {
+                        safeToJump = false; 
+                    }
+                }
+                
+                if (isGrounded && safeToJump)
                 {
                     zVel = 300f; // Standard CS2 jump impulse
                 }
