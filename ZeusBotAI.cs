@@ -23,8 +23,8 @@ namespace ZeusBotAI
 
     public class ZeusBotAIPlugin : BasePlugin
     {
-        public override string ModuleName => "Zeus Bot AI (Pincer Tactics & Infinite Zeus)";
-        public override string ModuleVersion => "10.0.1";
+        public override string ModuleName => "Zeus Bot AI (Aggressive Pushing & 2-Man Pincer)";
+        public override string ModuleVersion => "11.0.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -34,7 +34,7 @@ namespace ZeusBotAI
         {
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v10.0 Swarm Dynamics & Zeus Fix loaded.");
+            Console.WriteLine("[Zeus Bot AI] v11.0 Aggressive Pushing & 2-Man Pincers loaded.");
         }
 
         private void ProcessBotBrains()
@@ -77,7 +77,7 @@ namespace ZeusBotAI
                     memory.NextStrafeSwitch = currentTime + (random.NextSingle() * 1.5f + 1.5f);
                 }
 
-                // --- BOT-TO-BOT REPULSION (Spreading out) ---
+                // --- BOT-TO-BOT REPULSION (Nerfed so they can push closer together) ---
                 Vector totalRepulsion = new Vector(0, 0, 0);
                 var botPos = botPawn.AbsOrigin;
 
@@ -91,11 +91,11 @@ namespace ZeusBotAI
 
                         float distToAlly = (botPos - otherPawn.AbsOrigin).Length();
                         
-                        // If they are just roaming or far from the target, repel heavily to spread out
-                        if (distToAlly < 1000.0f)
+                        // Reduced from 1000.0f to 350.0f. They will only repel if they are physically bumping into each other.
+                        if (distToAlly < 350.0f)
                         {
                             Vector dirAway = GetNormalizedVector(otherPawn.AbsOrigin, botPos);
-                            float weight = (float)Math.Pow(1.0f - (distToAlly / 1000.0f), 2.0) * 2.5f; 
+                            float weight = (float)Math.Pow(1.0f - (distToAlly / 350.0f), 2.0) * 1.5f; 
                             totalRepulsion.X += dirAway.X * weight;
                             totalRepulsion.Y += dirAway.Y * weight;
                         }
@@ -150,13 +150,13 @@ namespace ZeusBotAI
                     bool isAirborne = ((botPawn.Flags & (uint)PlayerFlags.FL_ONGROUND) == 0) || Math.Abs(currentVel.Z) > 10.0f;
                     botPawn.MovementServices.Buttons.ButtonStates[0] = 0; 
 
-                    // --- ANTI-PINCER (Outmatched check) ---
+                    // --- ANTI-PINCER (Nerfed: Now requires 3+ enemies to trigger a retreat) ---
                     int enemiesNearby = 0;
                     Vector enemyCenter = new Vector(0, 0, 0);
                     foreach (var enemy in aliveEnemies)
                     {
                         var ePos = enemy.PlayerPawn.Value?.AbsOrigin;
-                        if (ePos != null && (botPos - ePos).Length() < 800.0f)
+                        if (ePos != null && (botPos - ePos).Length() < 600.0f)
                         {
                             enemiesNearby++;
                             enemyCenter.X += ePos.X;
@@ -164,7 +164,7 @@ namespace ZeusBotAI
                             enemyCenter.Z += ePos.Z;
                         }
                     }
-                    bool isOutmatched = enemiesNearby >= 2;
+                    bool isOutmatched = enemiesNearby >= 3; // Reduced cowardice: They will gladly fight a 1v2 now.
                     if (isOutmatched)
                     {
                         enemyCenter.X /= enemiesNearby;
@@ -172,9 +172,10 @@ namespace ZeusBotAI
                         enemyCenter.Z /= enemiesNearby;
                     }
 
-                    // --- PINCER THE PLAYER (Crossfire Matrix) ---
+                    // --- PINCER THE PLAYER (2-Man Limit) ---
                     Vector pincerWrapDir = new Vector(0, 0, 0);
                     bool isPincering = false;
+                    int pincerPartners = 0;
 
                     foreach (var ally in bots)
                     {
@@ -186,7 +187,6 @@ namespace ZeusBotAI
                         {
                             float allyDist = (allyPawn.AbsOrigin - targetPos).Length();
                             
-                            // If an ally is fighting the exact same target, find the perpendicular angle to their attack
                             if (allyDist < distance + 300.0f) 
                             {
                                 Vector allyToTarget = GetNormalizedVector(allyPawn.AbsOrigin, targetPos);
@@ -195,11 +195,14 @@ namespace ZeusBotAI
                                 Vector botToAlly = GetNormalizedVector(botPos, allyPawn.AbsOrigin);
                                 float sideCheck = DotProduct(perpAngle, botToAlly);
                                 
-                                // Steer to the opposite side of our ally
                                 if (sideCheck > 0) pincerWrapDir = new Vector(pincerWrapDir.X - perpAngle.X, pincerWrapDir.Y - perpAngle.Y, 0);
                                 else pincerWrapDir = new Vector(pincerWrapDir.X + perpAngle.X, pincerWrapDir.Y + perpAngle.Y, 0);
                                 
                                 isPincering = true;
+                                pincerPartners++;
+
+                                // LIMIT: Break the loop after finding ONE partner. (Bot + 1 Partner = 2-Man Pincer).
+                                if (pincerPartners >= 1) break; 
                             }
                         }
                     }
@@ -212,22 +215,22 @@ namespace ZeusBotAI
 
                     if (playerAimDot > 0.95f && distance < 1000.0f && currentTime > memory.FearEndTime)
                     {
-                        memory.FearEndTime = currentTime + 0.8f; 
+                        memory.FearEndTime = currentTime + 0.5f; // Reduced fear duration for more aggression
                         memory.StrafeDirection = (random.NextDouble() > 0.5) ? 1.0f : -1.0f; 
                         memory.NextStrafeSwitch = currentTime + 2.0f;
                     }
                     bool isAfraid = currentTime < memory.FearEndTime;
 
-                    // --- JUMP MATRIX (Heavily Tamed) ---
+                    // --- JUMP MATRIX ---
                     if (!isAirborne && currentTime > memory.JumpCooldown)
                     {
                         bool jumpExecuted = false;
 
-                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.08) // 8% chance to dodge
+                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.08) 
                         {
                             jumpExecuted = true;
                         }
-                        else if (!isAfraid && distance > 300.0f && distance < 700.0f && random.NextDouble() < 0.02) // 2% chance to push
+                        else if (!isAfraid && distance > 200.0f && distance < 700.0f && random.NextDouble() < 0.05) 
                         {
                             jumpExecuted = true;
                         }
@@ -235,43 +238,41 @@ namespace ZeusBotAI
                         if (jumpExecuted)
                         {
                             botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Jump;
-                            memory.JumpCooldown = currentTime + 2.5f; // Huge 2.5s cooldown
+                            memory.JumpCooldown = currentTime + 2.5f; 
                             memory.DuckReleaseTime = currentTime + 0.5f; 
                         }
                     }
 
-                    // --- INTELLIGENT KINEMATICS ---
+                    // --- AGGRESSIVE KINEMATICS ---
                     if (isOutmatched)
                     {
                         Vector fleeDir = GetNormalizedVector(enemyCenter, botPos);
-                        finalMoveDir = new Vector((fleeDir.X * 1.2f) + (strafeDir.X * 0.5f), (fleeDir.Y * 1.2f) + (strafeDir.Y * 0.5f), 0);
+                        finalMoveDir = new Vector((fleeDir.X * 0.8f) + (strafeDir.X * 0.8f), (fleeDir.Y * 0.8f) + (strafeDir.Y * 0.8f), 0);
+                    }
+                    else if (isPincering && distance > 120.0f) // Push much closer during a pincer
+                    {
+                        finalMoveDir = new Vector((pursuitDir.X * 0.6f) + (pincerWrapDir.X * 1.0f), (pursuitDir.Y * 0.6f) + (pincerWrapDir.Y * 1.0f), 0);
                     }
                     else if (isAfraid)
                     {
                         Vector evadeDir = new Vector(-targetForward.Y * memory.StrafeDirection, targetForward.X * memory.StrafeDirection, 0);
-                        finalMoveDir = new Vector((evadeDir.X * 1.5f) + (-pursuitDir.X * 0.4f), (evadeDir.Y * 1.5f) + (-pursuitDir.Y * 0.4f), 0);
+                        finalMoveDir = new Vector((evadeDir.X * 1.2f) + (pursuitDir.X * 0.3f), (evadeDir.Y * 1.2f) + (pursuitDir.Y * 0.3f), 0);
                     }
-                    else if (isPincering && distance > 200.0f)
+                    else if (distance > 130.0f) // The Aggressive Push Threshold. Was 350.0f!
                     {
-                        // Wrap around the player while closing the gap
-                        finalMoveDir = new Vector((pursuitDir.X * 0.4f) + (pincerWrapDir.X * 1.2f), (pursuitDir.Y * 0.4f) + (pincerWrapDir.Y * 1.2f), 0);
+                        finalMoveDir = new Vector((pursuitDir.X * 0.9f) + (strafeDir.X * 0.3f), (pursuitDir.Y * 0.9f) + (strafeDir.Y * 0.3f), 0);
                     }
-                    else if (distance > 350.0f)
-                    {
-                        finalMoveDir = new Vector((pursuitDir.X * 0.7f) + (strafeDir.X * 0.6f), (pursuitDir.Y * 0.7f) + (strafeDir.Y * 0.6f), 0);
-                    }
-                    else if (distance > 180.0f)
+                    else if (distance > 80.0f) // The Orbit (Kill Range)
                     {
                         finalMoveDir = new Vector((pursuitDir.X * 0.1f) + (strafeDir.X * 1.0f), (pursuitDir.Y * 0.1f) + (strafeDir.Y * 1.0f), 0);
                     }
-                    else
+                    else // The Backpedal (Only if you get way too close)
                     {
-                        finalMoveDir = new Vector((-pursuitDir.X * 0.5f) + (strafeDir.X * 0.8f), (-pursuitDir.Y * 0.5f) + (strafeDir.Y * 0.8f), 0);
+                        finalMoveDir = new Vector((-pursuitDir.X * 0.3f) + (strafeDir.X * 0.8f), (-pursuitDir.Y * 0.3f) + (strafeDir.Y * 0.8f), 0);
                     }
 
                     if (isAirborne) finalMoveDir = new Vector(finalMoveDir.X * 1.4f, finalMoveDir.Y * 1.4f, 0);
 
-                    // Add the macro repulsion (spreading out)
                     finalMoveDir.X += memory.RepulsionForce.X;
                     finalMoveDir.Y += memory.RepulsionForce.Y;
                     finalMoveDir = NormalizeVector(finalMoveDir);
@@ -307,7 +308,8 @@ namespace ZeusBotAI
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
                     }
 
-                    if (distance <= 180.0f && yawDiff < 4.0f && pitchDiff < 6.0f && currentTime > memory.TargetAcquiredTime + 0.1f)
+                    // STRICT TRIGGER DISCIPLINE: Distance reduced from 180.0f to 140.0f for guaranteed up-close hits.
+                    if (distance <= 140.0f && yawDiff < 4.0f && pitchDiff < 6.0f && currentTime > memory.TargetAcquiredTime + 0.1f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
                     }
@@ -351,7 +353,6 @@ namespace ZeusBotAI
             return (v1.X * v2.X) + (v1.Y * v2.Y) + (v1.Z * v2.Z);
         }
 
-        // --- INFINITE ZEUS FIX ---
         private void EnsureBotHasAndHoldsZeus(CCSPlayerController bot, CCSPlayerPawn botPawn)
         {
             var weaponServices = botPawn.WeaponServices;
@@ -370,7 +371,6 @@ namespace ZeusBotAI
                         hasZeus = true;
                         taserHandleRaw = weaponHandle.Raw;
                         
-                        // FIX: If the taser clip hits 0, instantly refill it to bypass the 30-second cooldown
                         if (weapon.Clip1 <= 0)
                         {
                             weapon.Clip1 = 1;
