@@ -24,7 +24,7 @@ namespace ZeusBotAI
         public float EscapeEndTime { get; set; } = 0f;
         public float NextFireTime { get; set; } = 0f; 
         
-        // --- NEW: LADDER LOGIC MEMORY ---
+        // --- LADDER LOGIC MEMORY ---
         public bool WasOnLadder { get; set; } = false;
         public float LadderClearTime { get; set; } = 0f;
         public Vector LadderClearDir { get; set; } = new Vector(0, 0, 0);
@@ -33,7 +33,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Ladder Logic Fix)";
-        public override string ModuleVersion => "16.0.1";
+        public override string ModuleVersion => "16.1.0";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -44,7 +44,7 @@ namespace ZeusBotAI
             Server.ExecuteCommand("bot_dont_shoot 0"); 
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v16.0 Ladder Logic Fix loaded.");
+            Console.WriteLine("[Zeus Bot AI] v16.1 Ladder Logic Fix (Scope Patch) loaded.");
         }
 
         private void ProcessBotBrains()
@@ -158,27 +158,24 @@ namespace ZeusBotAI
                     {
                         memory.WasOnLadder = true;
                         
-                        // Force them to look up or down depending on your elevation relative to them
-                        float perfectPitch = (targetPos.Z > botPos.Z) ? -60.0f : 60.0f;
-                        float newPitch = botAngles.X + NormalizeAngle(perfectPitch - botAngles.X) * memory.CurrentAimSpeed;
+                        // RENAMED VARIABLES to avoid CS0136 scope collision
+                        float ladderPitchTarget = (targetPos.Z > botPos.Z) ? -60.0f : 60.0f;
+                        float ladderSmoothedPitch = botAngles.X + NormalizeAngle(ladderPitchTarget - botAngles.X) * memory.CurrentAimSpeed;
                         
-                        // We teleport ONLY their aim. We do NOT inject velocity, which lets the engine climb naturally.
-                        var smoothedAnglesLadder = new QAngle(newPitch, botAngles.Y, 0);
+                        var smoothedAnglesLadder = new QAngle(ladderSmoothedPitch, botAngles.Y, 0);
                         botPawn.Teleport(null, smoothedAnglesLadder, null);
                         
-                        // Force the W key so they actively climb
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Forward;
                         
-                        continue; // Skip the rest of the ground kinematics for this tick
+                        continue; 
                     }
 
                     if (memory.WasOnLadder)
                     {
-                        // The bot just got off the ladder this tick
                         memory.WasOnLadder = false;
-                        memory.LadderClearTime = currentTime + 0.8f; // Give them 0.8 seconds to walk away from the lip
-                        memory.LadderClearDir = new Vector(pursuitDir.X, pursuitDir.Y, 0); // Lock vector forward
-                        memory.NextStrafeSwitch = currentTime + 1.5f; // Delay strafing so they don't side-step back into the hole
+                        memory.LadderClearTime = currentTime + 0.8f; 
+                        memory.LadderClearDir = new Vector(pursuitDir.X, pursuitDir.Y, 0); 
+                        memory.NextStrafeSwitch = currentTime + 1.5f; 
                     }
 
                     float distance = (botPos - targetPos).Length();
@@ -274,7 +271,6 @@ namespace ZeusBotAI
                     // --- MASTER KINEMATIC BLENDER ---
                     if (isClearingLadder)
                     {
-                        // Strict override: Walk directly away from the ladder to prevent falling back in
                         finalMoveDir = NormalizeVector(memory.LadderClearDir);
                     }
                     else if (isEscaping)
@@ -306,7 +302,6 @@ namespace ZeusBotAI
 
                     if (isAirborne && !isClearingLadder) finalMoveDir = new Vector(finalMoveDir.X * 1.2f, finalMoveDir.Y * 1.2f, 0);
 
-                    // Add Repulsion (only if not strictly clearing a ladder)
                     if (!isClearingLadder)
                     {
                         finalMoveDir.X += memory.RepulsionForce.X;
@@ -321,8 +316,8 @@ namespace ZeusBotAI
                     float deltaY = targetPos.Y - botPos.Y;
                     float deltaZ = (targetPos.Z + 50.0f) - (botPos.Z + 50.0f); 
 
-                    float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
                     float perfectPitch = (float)(Math.Atan2(-deltaZ, Math.Sqrt(deltaX * deltaX + deltaY * deltaY)) * 180.0 / Math.PI);
+                    float perfectYaw = (float)(Math.Atan2(deltaY, deltaX) * 180.0 / Math.PI);
 
                     perfectPitch = Math.Clamp(perfectPitch, -15.0f, 15.0f);
 
