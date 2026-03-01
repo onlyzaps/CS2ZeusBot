@@ -201,31 +201,25 @@ namespace ZeusBotAI
 
                 var fact = Memory.Facts[player.Index];
                 
-                // Real Line Of Sight Check
-                float dot = MathUtils.DotProduct(myForward, dirToOther);
-                bool inFOV = dot > 0.45f;
-                bool isClose = dist < 400f; // Hear footsteps/proximity
-
-                // We grant global wallhack "LastKnownPosition" so they always traverse to Enemies
-                // But threat only spikes when actually engaged.
+                // We grant global wallhack "LastKnownPosition" so Base AI can natively map route to them
                 fact.LastKnownPosition = otherPos;
                 fact.Confidence = 1.0f;
 
-                if (inFOV || isClose)
+                // Completely eliminate cross-map sliding and wall staring by tightening Combat Thresholds
+                float zDiff = Math.Abs(myPos.Z - otherPos.Z);
+                bool isClose = dist < 400f; // Close enough to engage
+                bool sameFloor = zDiff < 70f; // Prevent floor/ceiling staring
+                float dot = MathUtils.DotProduct(myForward, dirToOther);
+                bool inFOV = dot > 0.35f; // Native AI must naturally turn towards them first
+
+                if (isClose && sameFloor && inFOV)
                 {
                     fact.TimeSinceLastSeen = 0f;
-                    
-                    Vector enemyForward = MathUtils.GetForwardVector(otherPawn.EyeAngles!);
-                    float enemyAimDot = MathUtils.DotProduct(enemyForward, dirToOther * -1);
-                    
-                    // Threat calculation
-                    fact.ThreatLevel = Math.Max(0, (3000f - dist));
-                    if (enemyAimDot > 0.85f) fact.ThreatLevel += 2000f;
-                    if (isClose) fact.ThreatLevel += 3000f;
+                    fact.ThreatLevel = 3000f; // Instantly trigger Custom GOAP Custom Physics
                 }
                 else
                 {
-                    // Not fighting, just hunting. Low threat.
+                    // Not fighting. Let Base CS2 AI handle all NavMesh routing, freeze-time, and blind corners!
                     fact.ThreatLevel = 10f; 
                 }
             }
@@ -334,6 +328,12 @@ namespace ZeusBotAI
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
                 agent.Blackboard.DesiredSpeed = 250f;
             }
+            else
+            {
+                // Ensures we aren't sliding with our weapon out during freeze-time or cross-map traversal
+                agent.Blackboard.DesiredSpeed = 0f;
+                agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0);
+            }
         }
     }
 
@@ -370,6 +370,11 @@ namespace ZeusBotAI
             {
                 agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
                 agent.Blackboard.DesiredSpeed = 250f;
+            }
+            else
+            {
+                agent.Blackboard.DesiredSpeed = 0f;
+                agent.Blackboard.DesiredMoveDirection = new Vector(0,0,0);
             }
         }
     }
@@ -420,7 +425,8 @@ namespace ZeusBotAI
         
         public override bool IsDone(BotAgent agent) 
         {
-            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            // Instantly abort and give back control to Native CS2 AI if threat drops (target dipped behind corner or retreated)
+            if (agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.CurrentTargetFact.ThreatLevel < 100f) return true;
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             bool hasZeus = agent.GetWorldState().Values.GetValueOrDefault(StateKey.HasZeus, false);
             var activeWep = agent.Pawn?.WeaponServices?.ActiveWeapon.Value;
@@ -549,7 +555,7 @@ namespace ZeusBotAI
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         public override bool IsDone(BotAgent agent) 
         {
-            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            if (agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.CurrentTargetFact.ThreatLevel < 100f) return true;
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             return dist > 230f; // Target retreated out of active range, fail and re-plan
         }
@@ -625,7 +631,7 @@ namespace ZeusBotAI
         public override bool IsValid(BotAgent agent) => agent.Blackboard.CurrentTargetFact != null;
         public override bool IsDone(BotAgent agent) 
         {
-            if (agent.Blackboard.CurrentTargetFact == null) return true;
+            if (agent.Blackboard.CurrentTargetFact == null || agent.Blackboard.CurrentTargetFact.ThreatLevel < 100f) return true;
             float dist = (agent.Pawn.AbsOrigin! - agent.Blackboard.CurrentTargetFact.LastKnownPosition).Length();
             return dist > 85f; 
         }
