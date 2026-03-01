@@ -163,7 +163,13 @@ namespace ZeusBotAI
                 float dot = MathUtils.DotProduct(myForward, dirToOther);
                 bool inFOV = dot > 0.35f; // Native AI must naturally turn towards them first
 
-                if (isClose && sameFloor && inFOV)
+                // Raycast check so bots ignore enemies behind walls
+                float myEyeHeight = ((uint)Pawn.Flags & 2) != 0 ? 46f : 64f;
+                Vector eyePos = new Vector(myPos.X, myPos.Y, myPos.Z + myEyeHeight);
+                Vector enemyChest = new Vector(otherPos.X, otherPos.Y, otherPos.Z + 40f);
+                bool hasLineOfSight = isClose ? TraceUtils.IsVisible(eyePos, enemyChest, (int)Pawn.Index) : false;
+
+                if (isClose && sameFloor && inFOV && hasLineOfSight)
                 {
                     fact.TimeSinceLastSeen = 0f;
                     fact.ThreatLevel = 3000f; // Instantly trigger Custom GOAP Custom Physics
@@ -481,8 +487,10 @@ namespace ZeusBotAI
             // Aim Math
             float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
             Vector botHead = new Vector(myPos.X, myPos.Y, myPos.Z + eyeHeight);
-            Vector enemyChest = new Vector(targetPos.X, targetPos.Y, targetPos.Z + 50f);
-            Vector exactDir = MathUtils.NormalizeVector(enemyChest - botHead);
+            
+            float targetZ = Math.Clamp(botHead.Z, targetPos.Z, targetPos.Z + 72f);
+            Vector exactTarget = new Vector(targetPos.X, targetPos.Y, targetZ);
+            Vector exactDir = MathUtils.NormalizeVector(exactTarget - botHead);
             Vector curForward = MathUtils.GetForwardVector(agent.Pawn.EyeAngles!);
             
             float aimDot = MathUtils.DotProduct(curForward, exactDir);
@@ -619,6 +627,33 @@ namespace ZeusBotAI
     #endregion
 
     #region Math Utilities
+    public static class TraceUtils
+    {
+        public static bool IsVisible(Vector start, Vector end, int ignoreEntityIndex)
+        {
+            try 
+            {
+                IntPtr traceFilter = CounterStrikeSharp.API.Core.NativeAPI.NewSimpleTraceFilter(ignoreEntityIndex);
+                IntPtr pTraceResult = CounterStrikeSharp.API.Core.NativeAPI.NewTraceResult();
+                
+                IntPtr ray = CounterStrikeSharp.API.Core.NativeAPI.CreateRay1(0, start.Handle, end.Handle);
+                
+                // MASK_VISIBLE: 0x4600400B
+                CounterStrikeSharp.API.Core.NativeAPI.TraceRay(ray, pTraceResult, traceFilter, 0x4600400B);
+                
+                // Read fraction float at offset 0x50
+                int fractionBits = System.Runtime.InteropServices.Marshal.ReadInt32(pTraceResult, 0x50);
+                float fraction = BitConverter.Int32BitsToSingle(fractionBits);
+                
+                return fraction >= 0.99f;
+            } 
+            catch
+            {
+                return true;
+            }
+        }
+    }
+
     public static class MathUtils
     {
         public static float NormalizeAngle(float angle)
@@ -791,10 +826,13 @@ namespace ZeusBotAI
                 float dx = targetPos.X - botPos.X;
                 float dy = targetPos.Y - botPos.Y;
                 
-                // Adjust Z aiming to target chest/head height instead of lower body when closing the distance
-                float enemyChestHeight = 50f;
+                // Allow bots to aim at any height of the enemy's body without jerking their pitch unnecessarily
                 float botEyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
-                float dz = (targetPos.Z + enemyChestHeight) - (botPos.Z + botEyeHeight); 
+                float myEyeZ = botPos.Z + botEyeHeight;
+                
+                // Clamp target Z to the enemy's vertical boundary (0 to 72 units high) so we hit head or toes comfortably
+                float targetZ = Math.Clamp(myEyeZ, targetPos.Z, targetPos.Z + 72f); 
+                float dz = targetZ - myEyeZ; 
 
                 float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
                 float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
