@@ -18,7 +18,7 @@ namespace ZeusBotAI
         public int ConsecutiveJumps { get; set; } = 0;
         public float ResetJumpsTime { get; set; } = 0f;
         public float DuckReleaseTime { get; set; } = 0f;
-        public float CurrentAimSpeed { get; set; } = 0.15f; 
+        public float CurrentAimSpeed { get; set; } = 0.20f; 
         public Vector RepulsionForce { get; set; } = new Vector(0, 0, 0);
         public float FearEndTime { get; set; } = 0f;
     }
@@ -26,7 +26,7 @@ namespace ZeusBotAI
     public class ZeusBotAIPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Context Steering & Pro Sweeps)";
-        public override string ModuleVersion => "18.2.2";
+        public override string ModuleVersion => "18.2.3";
         
         private CounterStrikeSharp.API.Modules.Timers.Timer? brainTimer;
         private readonly Dictionary<uint, CombatState> botMemory = new Dictionary<uint, CombatState>();
@@ -36,7 +36,7 @@ namespace ZeusBotAI
         {
             brainTimer = AddTimer(0.1f, ProcessBotBrains, TimerFlags.REPEAT);
             RegisterListener<Listeners.OnTick>(InjectKinematicsAndAim);
-            Console.WriteLine("[Zeus Bot AI] v8.2 Pro Context Steering loaded (Safe Bhopping & Anti-Clump).");
+            Console.WriteLine("[Zeus Bot AI] v8.3 Pro Context Steering loaded (Aggressive Aim & Attack).");
         }
 
         private void ProcessBotBrains()
@@ -73,7 +73,8 @@ namespace ZeusBotAI
                 {
                     memory.CurrentTarget = target;
                     memory.TargetAcquiredTime = currentTime;
-                    memory.CurrentAimSpeed = (random.NextSingle() * 0.08f) + 0.12f; // Smooth, precise micro-adjustments
+                    // Slightly more aggressive aim speed (was 0.08 + 0.12)
+                    memory.CurrentAimSpeed = (random.NextSingle() * 0.10f) + 0.18f; 
                 }
 
                 // WIDE SWINGS: Less erratic shifting. Pros commit to strafes to cross your screen.
@@ -197,12 +198,12 @@ namespace ZeusBotAI
                         bool jumpExecuted = false;
 
                         // 1. Evasive Jump (Dodging Crosshair)
-                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.60) // Increased probability
+                        if (isAfraid && distance < 600.0f && random.NextDouble() < 0.60) 
                         {
                             jumpExecuted = true;
                         }
                         // 2. Aggressive Gap-Closing (The Ferrari Peek)
-                        else if (!isAfraid && distance > 300.0f && distance < 700.0f && random.NextDouble() < 0.40) // Increased probability
+                        else if (!isAfraid && distance > 300.0f && distance < 700.0f && random.NextDouble() < 0.40) 
                         {
                             jumpExecuted = true;
                         }
@@ -253,7 +254,7 @@ namespace ZeusBotAI
                     if (isAirborne)
                     {
                         // True Air-Strafing: Curve the momentum smoothly into the target vector
-                        finalMoveDir = new Vector(finalMoveDir.X * 1.75f, finalMoveDir.Y * 1.75f, 0); // Amplified for better air momentum
+                        finalMoveDir = new Vector(finalMoveDir.X * 1.75f, finalMoveDir.Y * 1.75f, 0); 
                     }
 
                     finalMoveDir.X += memory.RepulsionForce.X;
@@ -298,8 +299,8 @@ namespace ZeusBotAI
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Duck;
                     }
 
-                    // TRIGGER DISCIPLINE: Only fire when deeply lined up in the "Kill Zone" and guaranteed to hit
-                    if (distance <= 180.0f && yawDiff < 3.0f && pitchDiff < 3.0f && currentTime > memory.TargetAcquiredTime + 0.15f)
+                    // TRIGGER DISCIPLINE: More aggressive! Increased angle tolerance (from 3.0 to 4.5) and lowered reaction delay (0.15 to 0.10)
+                    if (distance <= 180.0f && yawDiff < 4.5f && pitchDiff < 4.5f && currentTime > memory.TargetAcquiredTime + 0.10f)
                     {
                         botPawn.MovementServices.Buttons.ButtonStates[0] |= (ulong)PlayerButtons.Attack;
                     }
