@@ -718,8 +718,10 @@ namespace ZeusBotAI
             RegisterListener<Listeners.OnTick>(OnTick);
             RegisterListener<Listeners.OnMapStart>(OnMapStart);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
-            RegisterEventHandler<EventPlayerChat>(OnPlayerChat);
             RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+            
+            AddCommandListener("say", OnPlayerChat);
+            AddCommandListener("say_team", OnPlayerChat);
 
             AddCommand("zeusbots", "Enable Zeus Bots", (player, info) => {
                 botsEnabled = true;
@@ -734,23 +736,29 @@ namespace ZeusBotAI
             Console.WriteLine("[Zeus Bot GOAP] Core Engine v3 loaded.");
         }
 
-        private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
+        private HookResult OnPlayerChat(CCSPlayerController? player, CommandInfo info)
         {
-            if (@event.Userid == null || !@event.Userid.IsValid) return HookResult.Continue;
+            if (player == null || !player.IsValid) return HookResult.Continue;
             
-            string text = @event.Text.Trim();
+            string text = info.GetArg(1).Trim();
             
+            // Remove quotes if present (sometimes arguments come quoted)
+            if (text.StartsWith("\"") && text.EndsWith("\"") && text.Length >= 2)
+            {
+                text = text.Substring(1, text.Length - 2);
+            }
+
             if (string.Equals(text, "zeusbots", StringComparison.OrdinalIgnoreCase) || 
                 string.Equals(text, "!zeusbots", StringComparison.OrdinalIgnoreCase))
             {
                 botsEnabled = true;
-                Server.PrintToChatAll($"Zeus Bots Enabled by {@event.Userid.PlayerName}");
+                Server.PrintToChatAll($"Zeus Bots Enabled by {player.PlayerName}");
             }
             else if (string.Equals(text, "normalbots", StringComparison.OrdinalIgnoreCase) || 
                      string.Equals(text, "!normalbots", StringComparison.OrdinalIgnoreCase))
             {
                 botsEnabled = false;
-                Server.PrintToChatAll($"Zeus Bots Disabled by {@event.Userid.PlayerName}");
+                Server.PrintToChatAll($"Zeus Bots Disabled by {player.PlayerName}");
             }
 
             return HookResult.Continue;
