@@ -1,4 +1,5 @@
 # ZeusBotAI
+https://youtu.be/rWnfR2Fp8VQ
 
 **Custom GOAP-Driven Bot AI for Counter-Strike 2**
 
