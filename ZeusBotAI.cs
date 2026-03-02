@@ -913,8 +913,17 @@ namespace ZeusBotAI
             // Submit buttons to engine (Crucial for Shooting / Ducking)
             pawn.MovementServices.Buttons.ButtonStates[0] |= agent.Blackboard.ButtonsToPress;
 
-            // Teleport rigidly applying custom combat forces
-            pawn.Teleport(null, outAngles, injectedVelocity);
+            // Teleport rigidly applying custom combat forces (keep physical body flat)
+            QAngle bodyAngles = new QAngle(0f, outAngles.Y, outAngles.Z);
+            pawn.Teleport(null, bodyAngles, injectedVelocity);
+
+            // Apply view angles for true "mouselook" tracking natively without leaning the hull
+            if (pawn.EyeAngles != null)
+            {
+                pawn.EyeAngles.X = outAngles.X;
+                pawn.EyeAngles.Y = outAngles.Y;
+                pawn.EyeAngles.Z = outAngles.Z;
+            }
         }
 
         public override void Unload(bool hotReload)
