@@ -45,4 +45,31 @@ Working with the Source 2 API to override bot pathing is currently pretty restri
 
 ---
 
+## 🎮 Commands & Configuration
+
+The plugin includes a chat command system to manage the bots in real-time. Commands can be typed in chat with or without the `!` prefix (e.g., `!zeusbots` or `zeusbots`).
+
+### Bot Management Commands
+These commands control the bot AI and population.
+* **`!zeusbots`**: Enables the custom Zeus/Knife GOAP AI.
+* **`!normalbots`**: Disables the custom AI, reverting bots to standard CS2 behavior.
+* **`!addtbot`**: Adds a new Terrorist bot to the game.
+* **`!addctbot`**: Adds a new CT bot to the game.
+* **`!removeallbots`**: Kicks all bots from the server.
+* **`!help`**: Displays the available commands in chat.
+
+### Permission Management (Admin Only)
+These commands control *who* is allowed to use the bot management commands above. They are strictly limited to admins with the `@css/generic` flag.
+* **`!playersmanage`**: Updates configuration to **ALLOW** all players to use bot management commands.
+* **`!adminsmanage`**: Updates configuration to **RESTRICT** bot management commands to Admins only.
+
+### Configuration Behavior
+The plugin uses a `config.json` file to persist permission settings.
+* **Default State**: Players can manage bots (`PLAYERS_MANAGE_BOTS = true`).
+* **Restricted State**: Only admins can manage bots (`PLAYERS_MANAGE_BOTS = false`).
+* **Help Message Visibility**:
+    * **Admins**: Always see the full list of commands.
+    * **Players (Allowed)**: See the bot management commands.
+    * **Players (Restricted)**: Do not receive any help message or command feedback.
+
 Basically, getting custom bot movement right in CS2 means fighting the engine a bit, but this setup handles the macro/micro handoff really smoothly. Feel free to use or modify the movement logic for your own PvE modes!
