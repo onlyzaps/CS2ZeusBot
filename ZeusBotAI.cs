@@ -518,8 +518,8 @@ namespace ZeusBotAI
             
             float aimDot = MathUtils.DotProduct(curForward, exactDir);
             
-            // Firing threshold
-            if (aimDot > 0.994f || (dist < 120f && aimDot > 0.980f)) 
+            // Firing threshold loosened to accommodate the organic noise/margin of aiming inaccuracy
+            if (aimDot > 0.985f || (dist < 150f && aimDot > 0.960f)) 
             {
                 if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
                 {
@@ -835,18 +835,39 @@ namespace ZeusBotAI
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector botPos = agent.Pawn.AbsOrigin!;
                 
-                float dx = targetPos.X - botPos.X;
-                float dy = targetPos.Y - botPos.Y;
-                
-                // Allow bots to aim at any height of the enemy's body without jerking their pitch unnecessarily
                 float botEyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
                 float myEyeZ = botPos.Z + botEyeHeight;
-                
-                // Clamp target Z to the enemy's vertical boundary (0 to 72 units high) so we hit head or toes comfortably
-                float targetZ = Math.Clamp(myEyeZ, targetPos.Z, targetPos.Z + 72f); 
-                float dz = targetZ - myEyeZ; 
 
+                // 1. Organic Margin of Inaccuracy: Widen the reticle center so it wanders around arm/shoulder/chest level
+                float time = Server.CurrentTime;
+                float noiseX = (float)Math.Sin(time * 4.2f + agent.Controller.Index) * 20f;
+                float noiseY = (float)Math.Cos(time * 3.8f + agent.Controller.Index) * 20f;
+                float noiseZ = (float)Math.Sin(time * 4.5f + agent.Controller.Index) * 15f;
+                
+                float focusX = targetPos.X + noiseX;
+                float focusY = targetPos.Y + noiseY;
+                
+                float dx = focusX - botPos.X;
+                float dy = focusY - botPos.Y;
                 float distance2D = (float)Math.Sqrt(dx * dx + dy * dy);
+
+                // Target approx chest/head height + organic vertical variance
+                float focusZ = targetPos.Z + 50f + noiseZ; 
+                
+                // 2. Anti-Wallhack Visuals ("Pre-aiming" corners)
+                if (distance2D > 350f) 
+                {
+                    // If target is far (potentially holding angle behind walls/radar spot), bias pitch heavily to the horizon 
+                    // This creates a realistic "holding an angle" appearance instead of tracking height perfectly through walls.
+                    focusZ = (myEyeZ * 0.7f) + (focusZ * 0.3f);
+                }
+                else 
+                {
+                    // Close combat: allow pitching down/up bounded to normal model limits
+                    focusZ = Math.Clamp(focusZ, targetPos.Z - 10f, targetPos.Z + 80f);
+                }
+
+                float dz = focusZ - myEyeZ;
 
                 // Stabilize perfectYaw if the target is directly above or below, preventing spinning in place
                 float perfectYaw = distance2D > 5.0f ? (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI) : agent.Pawn.EyeAngles!.Y;
