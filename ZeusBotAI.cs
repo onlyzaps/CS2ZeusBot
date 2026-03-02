@@ -901,7 +901,8 @@ namespace ZeusBotAI
                     if (zDiff > 100f && xyDist > 200f) safeToJump = false; 
                 }
                 
-                if (isGrounded && safeToJump && Server.CurrentTime > agent.Blackboard.JumpCooldown)
+                // Allow the jump! The GOAP Action already checked and updated the Jump Cooldown before sending this button press!
+                if (isGrounded && safeToJump)
                 {
                     injectedVelocity.Z = 300f; // CS2 explicit jump momentum
                 }
