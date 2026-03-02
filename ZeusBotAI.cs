@@ -158,15 +158,15 @@ namespace ZeusBotAI
 
                 // Completely eliminate cross-map sliding and wall staring by tightening Combat Thresholds
                 float zDiff = Math.Abs(myPos.Z - otherPos.Z);
-                bool isClose = dist < 600f; // Close enough to engage
-                bool sameFloor = zDiff < 70f; // Prevent floor/ceiling staring
+                bool isClose = dist < 750f; // Close enough to engage
+                bool reasonableZ = zDiff < 350f; // Allow tracking on stairs/ramps, but prevent direct ceiling staring
                 float dot = MathUtils.DotProduct(myForward, dirToOther);
-                bool inFOV = dot > 0.35f; // Native AI must naturally turn towards them first
+                bool inFOV = dot > 0.15f; // Loosened FOV so bots don't lose targets jumping rapidly
 
                 // Use native CS2 radar/spotted mechanics to evaluate visibility without leaking unmanaged memory
                 bool isSpotted = otherPawn.EntitySpottedState?.Spotted ?? false;
 
-                if (isClose && sameFloor && inFOV && isSpotted)
+                if (isClose && reasonableZ && inFOV && isSpotted)
                 {
                     fact.TimeSinceLastSeen = 0f;
                     fact.ThreatLevel = 3000f; // Instantly trigger Custom GOAP Custom Physics
@@ -343,8 +343,14 @@ namespace ZeusBotAI
             Vector targetPos = agent.Blackboard.CurrentTargetFact!.LastKnownPosition;
             Vector myPos = agent.Pawn.AbsOrigin!;
             float dist = (myPos - targetPos).Length();
-            Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-            Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+            
+            // Dynamic Anti-Clump Offset (staggered by bot index)
+            float clumpOffsetAngle = agent.Controller.Index * 36f + Server.CurrentTime * 3f;
+            Vector approachPos = new Vector(targetPos.X + (float)Math.Cos(clumpOffsetAngle) * 55f, targetPos.Y + (float)Math.Sin(clumpOffsetAngle) * 55f, targetPos.Z);
+
+            Vector dirToApproach = MathUtils.NormalizeVector(approachPos - myPos);
+            Vector exactTargetDir = MathUtils.NormalizeVector(targetPos - myPos);
+            Vector rightDir = new Vector(-exactTargetDir.Y, exactTargetDir.X, 0);
 
             bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
             float currentTime = Server.CurrentTime;
@@ -352,54 +358,58 @@ namespace ZeusBotAI
             if (currentTime > agent.Blackboard.NextStateTime)
             {
                 Random r = new Random();
-                agent.Blackboard.MovePattern = r.Next(0, 3);
-                agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 1.2 + 0.5);
+                // Favor jumping/strafing heavily (patterns 1, 2, 3) over general ground jitter (0)
+                agent.Blackboard.MovePattern = r.Next(0, 4); 
+                agent.Blackboard.NextStateTime = currentTime + (float)(r.NextDouble() * 1.0 + 0.5);
                 agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
-                agent.Blackboard.BhopCount = r.Next(1, 4);
+                agent.Blackboard.BhopCount = r.Next(2, 6); // More chained jumps
             }
 
             Vector mvmt = new Vector(0,0,0);
             float speed = 250f;
 
-            if (agent.Blackboard.MovePattern == 1 && agent.Blackboard.BhopCount > 0)
+            if (agent.Blackboard.MovePattern == 1 || agent.Blackboard.MovePattern == 3)
             {
-                // B-Hop
+                // Active B-Hop Strafe
                 if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
                     agent.Blackboard.JumpCooldown = currentTime + 0.3f;
                     agent.Blackboard.BhopCount--;
-                    agent.Blackboard.StrafeDir *= -1f; 
+                    // Change strafe direction mid air randomly for harder tracking
+                    if (agent.Blackboard.BhopCount % 2 == 0) agent.Blackboard.StrafeDir *= -1f; 
                 }
                 
                 if (!isGrounded)
                 {
-                    mvmt = MathUtils.NormalizeVector((dirToTarget * 0.8f) + (rightDir * agent.Blackboard.StrafeDir * 0.7f));
+                    // Sharp air strafes
+                    mvmt = MathUtils.NormalizeVector((dirToApproach * 0.7f) + (rightDir * agent.Blackboard.StrafeDir * 1.0f));
                     speed = 280f; 
+                    if (agent.Blackboard.BhopCount % 3 == 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
                 }
                 else
                 {
-                    mvmt = dirToTarget;
+                    mvmt = dirToApproach;
                 }
             }
             else if (agent.Blackboard.MovePattern == 2)
             {
-                // Air Strafe
+                // Wide Jump & Crouch-Slide
                 if (isGrounded && agent.Blackboard.JumpCooldown < currentTime)
                 {
                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
                     agent.Blackboard.JumpCooldown = currentTime + 0.6f;
                 }
-                float wideWeight = isGrounded ? 0.3f : 1.5f; 
-                mvmt = MathUtils.NormalizeVector((dirToTarget * 0.6f) + (rightDir * agent.Blackboard.StrafeDir * wideWeight));
+                float wideWeight = isGrounded ? 0.3f : 1.3f; 
+                mvmt = MathUtils.NormalizeVector((dirToApproach * 0.7f) + (rightDir * agent.Blackboard.StrafeDir * wideWeight));
                 if (!isGrounded) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
             }
             else 
             {
-                // Jitter Sprint (Smoothed out)
-                float jitter = (float)Math.Sin(currentTime * 4f + agent.Controller.Index);
-                if (Math.Abs(jitter) > 0.6f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
-                mvmt = MathUtils.NormalizeVector((dirToTarget * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.25f));
+                // Ground Jitter (Serpentine)
+                float jitter = (float)Math.Sin(currentTime * 5f + agent.Controller.Index);
+                if (Math.Abs(jitter) > 0.5f) agent.Blackboard.StrafeDir = Math.Sign(jitter);
+                mvmt = MathUtils.NormalizeVector((dirToApproach * 1.5f) + (rightDir * agent.Blackboard.StrafeDir * 0.4f));
             }
 
             agent.Blackboard.DesiredMoveDirection = mvmt;
@@ -452,8 +462,14 @@ namespace ZeusBotAI
             Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
             Vector myPos = agent.Pawn.AbsOrigin!;
             float dist = (targetPos - myPos).Length();
-            Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
-            Vector rightDir = new Vector(-dirToTarget.Y, dirToTarget.X, 0);
+            
+            // Fanning out when closing in to shoot
+            float clusterOffset = agent.Controller.Index * 50f + Server.CurrentTime * 2f;
+            Vector attackPos = new Vector(targetPos.X + (float)Math.Cos(clusterOffset) * 45f, targetPos.Y + (float)Math.Sin(clusterOffset) * 45f, targetPos.Z);
+
+            Vector dirToApproach = MathUtils.NormalizeVector(attackPos - myPos);
+            Vector exactDirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+            Vector rightDir = new Vector(-exactDirToTarget.Y, exactDirToTarget.X, 0);
 
             bool isGrounded = ((uint)agent.Pawn.Flags & 1) != 0;
             float time = Server.CurrentTime;
@@ -462,24 +478,34 @@ namespace ZeusBotAI
             if (time > agent.Blackboard.NextStateTime)
             {
                 Random r = new Random();
-                agent.Blackboard.MovePattern = r.Next(0, 2);
-                agent.Blackboard.NextStateTime = time + 0.5f;
+                agent.Blackboard.MovePattern = r.Next(0, 3); // Better combat variety
+                agent.Blackboard.NextStateTime = time + 0.4f;
                 agent.Blackboard.StrafeDir = r.NextDouble() > 0.5 ? 1f : -1f;
             }
 
             if (agent.Blackboard.MovePattern == 0)
             {
-                // Wider, slower ADAD peek
-                float strafeVal = Math.Sign(Math.Sin(time * 5f));
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToTarget * 0.25f) + (rightDir * strafeVal));
-                if (strafeVal > 0) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+                // Erratic ADAD Peek
+                float strafeVal = Math.Sign(Math.Sin(time * 6f));
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector((dirToApproach * 0.4f) + (rightDir * strafeVal * 0.8f));
+                if (strafeVal > 0 && isGrounded) agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Duck;
+            }
+            else if (agent.Blackboard.MovePattern == 1)
+            {
+                // Micro jump strafe
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToApproach + (rightDir * agent.Blackboard.StrafeDir * 0.5f));
+                if (isGrounded && agent.Blackboard.JumpCooldown < time)
+                {
+                     agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                     agent.Blackboard.JumpCooldown = time + 0.6f;
+                }
             }
             else
             {
-                // Aggressive close
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToTarget + (rightDir * agent.Blackboard.StrafeDir * 0.3f));
+                // Aggressive close with slight staggering
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(dirToApproach + (rightDir * agent.Blackboard.StrafeDir * 0.2f));
             }
-            agent.Blackboard.DesiredSpeed = 250f;
+            agent.Blackboard.DesiredSpeed = 260f;
 
             // Aim Math
             float eyeHeight = ((uint)agent.Pawn.Flags & 2) != 0 ? 46f : 64f; 
@@ -520,10 +546,22 @@ namespace ZeusBotAI
             {
                 Vector targetPos = agent.Blackboard.CurrentTargetFact.LastKnownPosition;
                 Vector myPos = agent.Pawn.AbsOrigin!;
-                Vector dirToTarget = MathUtils.NormalizeVector(targetPos - myPos);
+                
+                // Prevent exact body-stacking 
+                float clusterOffset = agent.Controller.Index * 60f + Server.CurrentTime;
+                Vector stabPos = new Vector(targetPos.X + (float)Math.Cos(clusterOffset) * 20f, targetPos.Y + (float)Math.Sin(clusterOffset) * 20f, targetPos.Z);
+                
+                Vector dirToTarget = MathUtils.NormalizeVector(stabPos - myPos);
                 
                 agent.Blackboard.DesiredMoveDirection = dirToTarget; 
-                agent.Blackboard.DesiredSpeed = 260f;
+                agent.Blackboard.DesiredSpeed = 270f; // Slightly faster for knife
+                
+                // Jump randomly if close to throw off enemy aim
+                if (((uint)agent.Pawn.Flags & 1) != 0 && agent.Blackboard.JumpCooldown < Server.CurrentTime && (targetPos - myPos).Length() < 150f)
+                {
+                    agent.Blackboard.ButtonsToPress |= (ulong)PlayerButtons.Jump;
+                    agent.Blackboard.JumpCooldown = Server.CurrentTime + 0.8f;
+                }
             }
             if (agent.Blackboard.ActionCooldown <= Server.CurrentTime)
             {
@@ -808,13 +846,16 @@ namespace ZeusBotAI
                 float targetZ = Math.Clamp(myEyeZ, targetPos.Z, targetPos.Z + 72f); 
                 float dz = targetZ - myEyeZ; 
 
-                float perfectYaw = (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI);
-                float perfectPitch = (float)(Math.Atan2(-dz, Math.Sqrt(dx * dx + dy * dy)) * 180.0 / Math.PI);
+                float distance2D = (float)Math.Sqrt(dx * dx + dy * dy);
+
+                // Stabilize perfectYaw if the target is directly above or below, preventing spinning in place
+                float perfectYaw = distance2D > 5.0f ? (float)(Math.Atan2(dy, dx) * 180.0 / Math.PI) : agent.Pawn.EyeAngles!.Y;
+                float perfectPitch = (float)(Math.Atan2(-dz, distance2D) * 180.0 / Math.PI);
                 
                 float currentYaw = agent.Pawn.EyeAngles!.Y;
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 
-                float aimLerp = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 0.7f : 0.3f; // Snap to aim only in combat
+                float aimLerp = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 0.8f : 0.3f; // Snappier aim in combat
                 
                 float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * aimLerp;
                 float newPitch = Math.Clamp(currentPitch + MathUtils.NormalizeAngle(perfectPitch - currentPitch) * aimLerp, -89f, 89f);
