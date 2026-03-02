@@ -714,8 +714,15 @@ namespace ZeusBotAI
         public override void Load(bool hotReload)
         {
             RegisterListener<Listeners.OnTick>(OnTick);
+            RegisterListener<Listeners.OnMapStart>(OnMapStart);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
             Console.WriteLine("[Zeus Bot GOAP] Core Engine v3 loaded.");
+        }
+
+        private void OnMapStart(string mapName)
+        {
+            agents.Clear();
+            tickCounter = 0;
         }
 
         private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
@@ -723,6 +730,11 @@ namespace ZeusBotAI
             var controller = @event.Userid;
             if (controller != null && controller.IsValid && controller.IsBot)
             {
+                if (agents.ContainsKey(controller.Index))
+                {
+                    agents.Remove(controller.Index);
+                }
+
                 if (!assignedNames.ContainsKey(controller.Index))
                 {
                     assignedNames[controller.Index] = BotNames[rnd.Next(BotNames.Length)];
@@ -967,6 +979,7 @@ namespace ZeusBotAI
         public override void Unload(bool hotReload)
         {
             RemoveListener<Listeners.OnTick>(OnTick);
+            RemoveListener<Listeners.OnMapStart>(OnMapStart);
             agents.Clear();
             assignedNames.Clear();
         }
