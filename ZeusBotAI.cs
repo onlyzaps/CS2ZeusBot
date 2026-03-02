@@ -859,14 +859,14 @@ namespace ZeusBotAI
                 float yawDiff = MathUtils.NormalizeAngle(perfectYaw - currentYaw);
                 float pitchDiff = MathUtils.NormalizeAngle(perfectPitch - currentPitch);
 
-                // Swift tracking: Cap the maximum turn speed so large snaps transition rather than being instant
-                float turnSpeed = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 600f : 200f; // Degrees per second
-                float maxTurn = turnSpeed * dt;
+                // Swift tracking: Constant-speed organic rotation instead of easing 
+                // Easing causes the bot's crosshair to trail endlessly behind moving targets.
+                float turnSpeed = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 800f : 300f; // Degrees per second
+                float maxStep = turnSpeed * dt;
                 
-                // Smooth closure strictly bounded by maxTurn
-                float lerpFactor = 12f * dt; 
-                float yawStep = Math.Clamp(yawDiff * lerpFactor, -maxTurn, maxTurn);
-                float pitchStep = Math.Clamp(pitchDiff * lerpFactor, -maxTurn, maxTurn);
+                // Directly close the distance cap bounded by maxStep to avoid "floaty" aim
+                float yawStep = Math.Clamp(yawDiff, -maxStep, maxStep);
+                float pitchStep = Math.Clamp(pitchDiff, -maxStep, maxStep);
                 
                 float newYaw = currentYaw + yawStep;
                 float newPitch = Math.Clamp(currentPitch + pitchStep, -89f, 89f);
@@ -934,6 +934,12 @@ namespace ZeusBotAI
                 pawn.EyeAngles.X = outAngles.X;
                 pawn.EyeAngles.Y = outAngles.Y;
                 pawn.EyeAngles.Z = outAngles.Z;
+            }
+            if (pawn.V_angle != null)
+            {
+                pawn.V_angle.X = outAngles.X;
+                pawn.V_angle.Y = outAngles.Y;
+                pawn.V_angle.Z = outAngles.Z;
             }
         }
 
