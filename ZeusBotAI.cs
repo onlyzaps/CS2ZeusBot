@@ -2,9 +2,13 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Modules.Utils;
 using CounterStrikeSharp.API.Modules.Commands;
+using CounterStrikeSharp.API.Modules.Admin;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace ZeusBotAI
 {
@@ -694,12 +698,19 @@ namespace ZeusBotAI
     #endregion
 
     #region Main Plugin Component
+    public class ZeusBotConfig
+    {
+        [JsonPropertyName("PLAYERS_MANAGE_BOTS")]
+        public bool PlayersManageBots { get; set; } = true;
+    }
+
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Refactored Core)";
         public override string ModuleVersion => "3.0.0";
 
         private bool botsEnabled = true;
+        private ZeusBotConfig _config = new ZeusBotConfig();
 
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
@@ -716,6 +727,7 @@ namespace ZeusBotAI
 
         public override void Load(bool hotReload)
         {
+            LoadConfig();
             RegisterListener<Listeners.OnTick>(OnTick);
             RegisterListener<Listeners.OnMapStart>(OnMapStart);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
@@ -725,16 +737,125 @@ namespace ZeusBotAI
             AddCommandListener("say_team", OnPlayerChat);
 
             AddCommand("zeusbots", "Enable Zeus Bots", (player, info) => {
-                botsEnabled = true;
-                Server.PrintToChatAll("Zeus Bots Enabled via Console Command");
+                if (CheckCommandPermission(player))
+                {
+                    botsEnabled = true;
+                    Server.PrintToChatAll("Zeus Bots Enabled via Console Command");
+                }
             });
 
             AddCommand("normalbots", "Disable Zeus Bots", (player, info) => {
-                botsEnabled = false;
-                Server.PrintToChatAll("Zeus Bots Disabled via Console Command");
+                if (CheckCommandPermission(player))
+                {
+                    botsEnabled = false;
+                    Server.PrintToChatAll("Zeus Bots Disabled via Console Command");
+                }
+            });
+
+            AddCommand("removeallbots", "Kick all bots", (player, info) => {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_kick");
+                    Server.PrintToChatAll("All bots kicked via Console Command");
+                }
+            });
+
+            AddCommand("addtbot", "Add T Bot", (player, info) => {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_add_t");
+                    Server.PrintToChatAll("Terrorist Bot Added via Console Command");
+                }
+            });
+
+            AddCommand("addctbot", "Add CT Bot", (player, info) => {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_add_ct");
+                    Server.PrintToChatAll("CT Bot Added via Console Command");
+                }
             });
 
             Console.WriteLine("[Zeus Bot GOAP] Core Engine v3 loaded.");
+        }
+
+        private void LoadConfig()
+        {
+            string configPath = Path.Combine(ModuleDirectory, "../../configs/plugins/ZeusBotAI/config.json");
+            // If running locally/testing, fallback to local path
+            if (!File.Exists(configPath))
+            {
+                configPath = Path.Combine(ModuleDirectory, "config.json");
+            }
+
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    string json = File.ReadAllText(configPath);
+                    var config = JsonSerializer.Deserialize<ZeusBotConfig>(json);
+                    if (config != null)
+                    {
+                        _config = config;
+                        Console.WriteLine($"[ZeusBotAI] Config Loaded: PLAYERS_MANAGE_BOTS={_config.PlayersManageBots}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                     Console.WriteLine($"[ZeusBotAI] Error loading config: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[ZeusBotAI] Config not found at {configPath}, using defaults.");
+            }
+        }
+
+        private void SaveConfig()
+        {
+            string configPath = Path.Combine(ModuleDirectory, "../../configs/plugins/ZeusBotAI/config.json");
+            if (!File.Exists(configPath))
+            {
+                configPath = Path.Combine(ModuleDirectory, "config.json");
+            }
+
+            try
+            {
+                string json = JsonSerializer.Serialize(_config, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(configPath, json);
+                Console.WriteLine($"[ZeusBotAI] Config Saved: PLAYERS_MANAGE_BOTS={_config.PlayersManageBots}");
+            }
+            catch (Exception ex)
+            {
+                 Console.WriteLine($"[ZeusBotAI] Error saving config: {ex.Message}");
+            }
+        }
+
+        private bool CheckCommandPermission(CCSPlayerController? player)
+        {
+            if (player == null) return true; // Console/Server always has permission
+            if (_config.PlayersManageBots) return true;
+            
+            bool isAdmin = AdminManager.PlayerHasPermissions(player, "@css/generic");
+            if (!isAdmin)
+            {
+                player.PrintToChat(" \x02[ZeusBots] You do not have permission to use this command.");
+                return false;
+            }
+            return true;
+        }
+
+        private void PrintHelpMessage(CCSPlayerController player)
+        {
+            bool isAdmin = AdminManager.PlayerHasPermissions(player, "@css/generic");
+            if (!isAdmin && !_config.PlayersManageBots) return;
+
+            string msg = " \x0C[ZeusBots] Commands: !zeusbots, !normalbots, !removeallbots, !addtbot, !addctbot, !help";
+            if (isAdmin)
+            {
+                msg += ", !playersmanage, !adminsmanage";
+            }
+            player.PrintToChat(msg);
         }
 
         private HookResult OnPlayerChat(CCSPlayerController? player, CommandInfo info)
@@ -752,14 +873,80 @@ namespace ZeusBotAI
             if (string.Equals(text, "zeusbots", StringComparison.OrdinalIgnoreCase) || 
                 string.Equals(text, "!zeusbots", StringComparison.OrdinalIgnoreCase))
             {
-                botsEnabled = true;
-                Server.PrintToChatAll($"Zeus Bots Enabled by {player.PlayerName}");
+                if (CheckCommandPermission(player))
+                {
+                    botsEnabled = true;
+                    Server.PrintToChatAll($"Zeus Bots Enabled by {player.PlayerName}");
+                }
             }
             else if (string.Equals(text, "normalbots", StringComparison.OrdinalIgnoreCase) || 
                      string.Equals(text, "!normalbots", StringComparison.OrdinalIgnoreCase))
             {
-                botsEnabled = false;
-                Server.PrintToChatAll($"Zeus Bots Disabled by {player.PlayerName}");
+                if (CheckCommandPermission(player))
+                {
+                    botsEnabled = false;
+                    Server.PrintToChatAll($"Zeus Bots Disabled by {player.PlayerName}");
+                }
+            }
+            else if (string.Equals(text, "removeallbots", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!removeallbots", StringComparison.OrdinalIgnoreCase))
+            {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_kick");
+                    Server.PrintToChatAll($"All bots kicked by {player.PlayerName}");
+                }
+            }
+            else if (string.Equals(text, "addtbot", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!addtbot", StringComparison.OrdinalIgnoreCase))
+            {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_add_t");
+                    Server.PrintToChatAll($"Terrorist Bot Added by {player.PlayerName}");
+                }
+            }
+            else if (string.Equals(text, "addctbot", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!addctbot", StringComparison.OrdinalIgnoreCase))
+            {
+                if (CheckCommandPermission(player))
+                {
+                    Server.ExecuteCommand("bot_add_ct");
+                    Server.PrintToChatAll($"CT Bot Added by {player.PlayerName}");
+                }
+            }
+            else if (string.Equals(text, "playersmanage", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!playersmanage", StringComparison.OrdinalIgnoreCase))
+            {
+                if (AdminManager.PlayerHasPermissions(player, "@css/generic"))
+                {
+                    _config.PlayersManageBots = true;
+                    SaveConfig();
+                    Server.PrintToChatAll(" \x0C[ZeusBots] Config Updated: Players can now manage bots.");
+                }
+                else
+                {
+                    player.PrintToChat(" \x02[ZeusBots] You do not have permission to use this command.");
+                }
+            }
+            else if (string.Equals(text, "adminsmanage", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!adminsmanage", StringComparison.OrdinalIgnoreCase))
+            {
+                if (AdminManager.PlayerHasPermissions(player, "@css/generic"))
+                {
+                    _config.PlayersManageBots = false;
+                    SaveConfig();
+                    Server.PrintToChatAll(" \x0C[ZeusBots] Config Updated: Only admins can now manage bots.");
+                }
+                else
+                {
+                    player.PrintToChat(" \x02[ZeusBots] You do not have permission to use this command.");
+                }
+            }
+            else if (string.Equals(text, "help", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!help", StringComparison.OrdinalIgnoreCase))
+            {
+                PrintHelpMessage(player);
             }
 
             return HookResult.Continue;
@@ -769,7 +956,7 @@ namespace ZeusBotAI
         {
             if (@event.Userid != null && @event.Userid.IsValid && !@event.Userid.IsBot)
             {
-                @event.Userid.PrintToChat(" \x04[ZeusBots]\x01 Type \x03!zeusbots\x01 to ENABLE or \x03!normalbots\x01 to DISABLE bot AI.");
+                PrintHelpMessage(@event.Userid);
             }
             return HookResult.Continue;
         }
