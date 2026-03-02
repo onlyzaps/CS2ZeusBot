@@ -698,6 +698,8 @@ namespace ZeusBotAI
         public override string ModuleName => "Zeus Bot AI (Refactored Core)";
         public override string ModuleVersion => "3.0.0";
 
+        private bool botsEnabled = true;
+
         private Dictionary<uint, BotAgent> agents = new Dictionary<uint, BotAgent>();
         private GoapPlanner planner = new GoapPlanner();
         private int tickCounter = 0;
@@ -716,7 +718,51 @@ namespace ZeusBotAI
             RegisterListener<Listeners.OnTick>(OnTick);
             RegisterListener<Listeners.OnMapStart>(OnMapStart);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
+            RegisterEventHandler<EventPlayerChat>(OnPlayerChat);
+            RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+
+            AddCommand("zeusbots", "Enable Zeus Bots", (player, info) => {
+                botsEnabled = true;
+                Server.PrintToChatAll("Zeus Bots Enabled via Console Command");
+            });
+
+            AddCommand("normalbots", "Disable Zeus Bots", (player, info) => {
+                botsEnabled = false;
+                Server.PrintToChatAll("Zeus Bots Disabled via Console Command");
+            });
+
             Console.WriteLine("[Zeus Bot GOAP] Core Engine v3 loaded.");
+        }
+
+        private HookResult OnPlayerChat(EventPlayerChat @event, GameEventInfo info)
+        {
+            if (@event.Userid == null || !@event.Userid.IsValid) return HookResult.Continue;
+            
+            string text = @event.Text.Trim();
+            
+            if (string.Equals(text, "zeusbots", StringComparison.OrdinalIgnoreCase) || 
+                string.Equals(text, "!zeusbots", StringComparison.OrdinalIgnoreCase))
+            {
+                botsEnabled = true;
+                Server.PrintToChatAll($"Zeus Bots Enabled by {@event.Userid.PlayerName}");
+            }
+            else if (string.Equals(text, "normalbots", StringComparison.OrdinalIgnoreCase) || 
+                     string.Equals(text, "!normalbots", StringComparison.OrdinalIgnoreCase))
+            {
+                botsEnabled = false;
+                Server.PrintToChatAll($"Zeus Bots Disabled by {@event.Userid.PlayerName}");
+            }
+
+            return HookResult.Continue;
+        }
+
+        private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
+        {
+            if (@event.Userid != null && @event.Userid.IsValid && !@event.Userid.IsBot)
+            {
+                @event.Userid.PrintToChat(" \x04[ZeusBots]\x01 Type \x03!zeusbots\x01 to ENABLE or \x03!normalbots\x01 to DISABLE bot AI.");
+            }
+            return HookResult.Continue;
         }
 
         private void OnMapStart(string mapName)
@@ -727,6 +773,8 @@ namespace ZeusBotAI
 
         private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
         {
+            if (!botsEnabled) return HookResult.Continue;
+
             var controller = @event.Userid;
             if (controller != null && controller.IsValid && controller.IsBot)
             {
@@ -775,6 +823,8 @@ namespace ZeusBotAI
 
         private void OnTick()
         {
+            if (!botsEnabled) return;
+
             tickCounter++;
             float currentTime = Server.CurrentTime;
             float dt = Server.TickInterval;
