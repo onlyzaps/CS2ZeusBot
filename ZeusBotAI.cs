@@ -855,10 +855,21 @@ namespace ZeusBotAI
                 float currentYaw = agent.Pawn.EyeAngles!.Y;
                 float currentPitch = agent.Pawn.EyeAngles.X;
                 
-                float aimLerp = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 0.8f : 0.3f; // Snappier aim in combat
+                // Calculate true angular differences
+                float yawDiff = MathUtils.NormalizeAngle(perfectYaw - currentYaw);
+                float pitchDiff = MathUtils.NormalizeAngle(perfectPitch - currentPitch);
+
+                // Swift tracking: Cap the maximum turn speed so large snaps transition rather than being instant
+                float turnSpeed = agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f ? 600f : 200f; // Degrees per second
+                float maxTurn = turnSpeed * dt;
                 
-                float newYaw = currentYaw + MathUtils.NormalizeAngle(perfectYaw - currentYaw) * aimLerp;
-                float newPitch = Math.Clamp(currentPitch + MathUtils.NormalizeAngle(perfectPitch - currentPitch) * aimLerp, -89f, 89f);
+                // Smooth closure strictly bounded by maxTurn
+                float lerpFactor = 12f * dt; 
+                float yawStep = Math.Clamp(yawDiff * lerpFactor, -maxTurn, maxTurn);
+                float pitchStep = Math.Clamp(pitchDiff * lerpFactor, -maxTurn, maxTurn);
+                
+                float newYaw = currentYaw + yawStep;
+                float newPitch = Math.Clamp(currentPitch + pitchStep, -89f, 89f);
                 
                 agent.Blackboard.DesiredAim = new QAngle(newPitch, newYaw, 0);
             }
