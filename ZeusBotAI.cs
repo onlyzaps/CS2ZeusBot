@@ -732,9 +732,18 @@ namespace ZeusBotAI
             RegisterListener<Listeners.OnMapStart>(OnMapStart);
             RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
             RegisterEventHandler<EventPlayerConnectFull>(OnPlayerConnectFull);
+            RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
             
             AddCommandListener("say", OnPlayerChat);
             AddCommandListener("say_team", OnPlayerChat);
+
+            // Apply names to any bots already on the server (e.g. after hot reload)
+            Server.NextFrame(() => {
+                foreach (var player in Utilities.GetPlayers())
+                {
+                    if (player.IsBot) EnsureBotName(player);
+                }
+            });
 
             AddCommand("zeusbots", "Enable Zeus Bots", (player, info) => {
                 if (CheckCommandPermission(player))
@@ -848,14 +857,29 @@ namespace ZeusBotAI
         private void PrintHelpMessage(CCSPlayerController player)
         {
             bool isAdmin = AdminManager.PlayerHasPermissions(player, "@css/generic");
-            if (!isAdmin && !_config.PlayersManageBots) return;
+            bool canManage = isAdmin || _config.PlayersManageBots;
 
-            string msg = " \x0C[ZeusBots] Commands: !zeusbots, !normalbots, !removeallbots, !addtbot, !addctbot, !help";
+            if (!canManage) return;
+
+            // Header: Three dashes (White), Title (Blue), Three dashes (White)
+            player.PrintToChat(" \x01--- \x0CZeusBotAI Commands\x01 ---");
+
             if (isAdmin)
             {
-                msg += ", !playersmanage, !adminsmanage";
+                player.PrintToChat(" \x0C!playersmanage\x01 - Allow players to manage bots");
+                player.PrintToChat(" \x0C!adminsmanage\x01 - Restrict management to admins");
             }
-            player.PrintToChat(msg);
+
+            // General Commands
+            if (canManage)
+            {
+                player.PrintToChat(" \x0C!zeusbots\x01 - Enable Zeus Bots");
+                player.PrintToChat(" \x0C!normalbots\x01 - Disable Zeus Bots");
+                player.PrintToChat(" \x0C!addtbot\x01 - Add Terrorist Bot");
+                player.PrintToChat(" \x0C!addctbot\x01 - Add Counter-Terrorist Bot");
+                player.PrintToChat(" \x0C!removeallbots\x01 - Kick all bots");
+                player.PrintToChat(" \x0C!help\x01 - Show this help");
+            }
         }
 
         private HookResult OnPlayerChat(CCSPlayerController? player, CommandInfo info)
@@ -954,11 +978,66 @@ namespace ZeusBotAI
 
         private HookResult OnPlayerConnectFull(EventPlayerConnectFull @event, GameEventInfo info)
         {
-            if (@event.Userid != null && @event.Userid.IsValid && !@event.Userid.IsBot)
+            if (@event.Userid == null || !@event.Userid.IsValid) return HookResult.Continue;
+
+            if (!@event.Userid.IsBot)
             {
-                PrintHelpMessage(@event.Userid);
+                // Delay 1.0s so the user sees the chat message after loading
+                AddTimer(1.0f, () =>
+                {
+                    if (@event.Userid != null && @event.Userid.IsValid)
+                    {
+                        PrintHelpMessage(@event.Userid);
+                    }
+                });
+            }
+            else
+            {
+                // Name bots as soon as they fully connect
+                EnsureBotName(@event.Userid);
             }
             return HookResult.Continue;
+        }
+
+        private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+        {
+            // Free up the name when a bot disconnects
+            if (@event.Userid != null && @event.Userid.IsBot && assignedNames.ContainsKey(@event.Userid.Index))
+            {
+                assignedNames.Remove(@event.Userid.Index);
+            }
+            return HookResult.Continue;
+        }
+
+        private void EnsureBotName(CCSPlayerController bot)
+        {
+            if (bot == null || !bot.IsValid || !bot.IsBot) return;
+
+            if (!assignedNames.ContainsKey(bot.Index))
+            {
+                // Uniqueness Check
+                var usedNames = new HashSet<string>(assignedNames.Values);
+                var available = BotNames.Where(n => !usedNames.Contains(n)).ToList();
+
+                if (available.Count > 0)
+                {
+                    assignedNames[bot.Index] = available[rnd.Next(available.Count)];
+                }
+                else
+                {
+                    // Fallback if we have > 30 bots (start reusing random ones)
+                    assignedNames[bot.Index] = BotNames[rnd.Next(BotNames.Length)];
+                }
+            }
+            
+            string desiredName = assignedNames[bot.Index];
+            
+            // Apply name (Check first to avoid netprop spam)
+            if (bot.PlayerName != desiredName)
+            {
+                bot.PlayerName = desiredName;
+                Utilities.SetStateChanged(bot, "CBasePlayerController", "m_iszPlayerName");
+            }
         }
 
         private void OnMapStart(string mapName)
