@@ -980,21 +980,24 @@ namespace ZeusBotAI
         {
             if (@event.Userid == null || !@event.Userid.IsValid) return HookResult.Continue;
 
-            if (!@event.Userid.IsBot)
+            // CRITICAL FIX: Capture the player reference locally. 
+            // Accessing the '@event' object inside a delayed timer causes a server crash because the event object is disposed.
+            var player = @event.Userid;
+
+            if (!player.IsBot)
             {
                 // Delay 1.0s so the user sees the chat message after loading
                 AddTimer(1.0f, () =>
                 {
-                    if (@event.Userid != null && @event.Userid.IsValid)
+                    if (player != null && player.IsValid)
                     {
-                        PrintHelpMessage(@event.Userid);
+                        PrintHelpMessage(player);
                     }
                 });
             }
             else
             {
-                // Name bots as soon as they fully connect
-                EnsureBotName(@event.Userid);
+                EnsureBotName(player);
             }
             return HookResult.Continue;
         }
