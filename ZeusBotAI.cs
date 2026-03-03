@@ -251,7 +251,7 @@ namespace ZeusBotAI
             }
             if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f && agent.Pawn != null && agent.Pawn.AbsOrigin != null)
             {
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin.Value);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin);
                 agent.Blackboard.DesiredSpeed = 250f;
             }
             else
@@ -288,7 +288,7 @@ namespace ZeusBotAI
             }
             if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f && agent.Pawn != null && agent.Pawn.AbsOrigin != null)
             {
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin.Value);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin);
                 agent.Blackboard.DesiredSpeed = 250f;
             }
             else
