@@ -249,9 +249,9 @@ namespace ZeusBotAI
                     }
                 }
             }
-            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f)
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f && agent.Pawn != null && agent.Pawn.AbsOrigin != null)
             {
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin.Value);
                 agent.Blackboard.DesiredSpeed = 250f;
             }
             else
@@ -286,9 +286,9 @@ namespace ZeusBotAI
                     }
                 }
             }
-            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f)
+            if (agent.Blackboard.CurrentTargetFact != null && agent.Blackboard.CurrentTargetFact.ThreatLevel > 100f && agent.Pawn != null && agent.Pawn.AbsOrigin != null)
             {
-                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin!);
+                agent.Blackboard.DesiredMoveDirection = MathUtils.NormalizeVector(agent.Blackboard.CurrentTargetFact.LastKnownPosition - agent.Pawn.AbsOrigin.Value);
                 agent.Blackboard.DesiredSpeed = 250f;
             }
             else
@@ -980,20 +980,11 @@ namespace ZeusBotAI
         {
             if (@event.Userid == null || !@event.Userid.IsValid) return HookResult.Continue;
 
-            // CRITICAL FIX: Capture the player reference locally. 
-            // Accessing the '@event' object inside a delayed timer causes a server crash because the event object is disposed.
             var player = @event.Userid;
 
             if (!player.IsBot)
             {
-                // Delay 1.0s so the user sees the chat message after loading
-                AddTimer(1.0f, () =>
-                {
-                    if (player != null && player.IsValid)
-                    {
-                        PrintHelpMessage(player);
-                    }
-                });
+                PrintHelpMessage(player);
             }
             else
             {
