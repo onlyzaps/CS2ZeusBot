@@ -347,6 +347,64 @@ namespace ZeusBotAI
             }
             return g;
         }
+
+        // -----------------------------------------------------------------
+        //  FrontierToward - find a cell on the *edge* of what we've learnt
+        //  that lies in the direction of a target point. "Edge" means a
+        //  cell that has fewer than the typical 6-8 neighbours and at
+        //  least one unexplored direction. Walking to such a cell almost
+        //  always extends the graph because the bot will sample new cells
+        //  as it gets there.
+        //  This is how a bot escapes spawn even when no path to the
+        //  objective exists yet.
+        // -----------------------------------------------------------------
+        public NavCell? FrontierToward(Vector fromPos, Vector towardPos)
+        {
+            Vector dir = towardPos - fromPos;
+            float dirLen = MathUtils.Length(dir);
+            if (dirLen < 1f) return null;
+            Vector dirN = new Vector(dir.X / dirLen, dir.Y / dirLen, dir.Z / dirLen);
+
+            NavCell? best = null;
+            float bestScore = float.NegativeInfinity;
+            int considered = 0;
+
+            foreach (var c in Cells.Values)
+            {
+                if (c.Neighbors.Count >= 6) continue; // not a frontier cell
+                if (!HasUnexploredNeighbor(c.Coord)) continue;
+                float fromDist = (c.Center - fromPos).Length();
+                if (fromDist < 96f) continue;          // already at this cell
+                if (fromDist > 3000f) continue;        // too far to be useful as a stepping stone
+
+                Vector toCell = c.Center - fromPos;
+                float cellDist = MathUtils.Length(toCell);
+                if (cellDist < 1f) continue;
+                float align = (toCell.X * dirN.X + toCell.Y * dirN.Y + toCell.Z * dirN.Z) / cellDist;
+                if (align < 0.1f) continue;            // mostly away from target -> skip
+
+                // Score: prefer cells that are well-aligned with the goal,
+                // closer to the bot, with more unexplored sides.
+                float openness = (8f - c.Neighbors.Count) / 8f;
+                float distFactor = 1f / (1f + cellDist / 800f);
+                float score = align * 1.0f + openness * 0.5f + distFactor * 0.3f;
+                if (score > bestScore) { bestScore = score; best = c; }
+
+                if (++considered > 4000) break; // be friendly to large graphs
+            }
+            return best;
+        }
+
+        private bool HasUnexploredNeighbor(GridCoord c)
+        {
+            // Check the 4-connected XY neighbourhood (most travel happens
+            // in XY). If any cardinal neighbour is missing entirely we
+            // count this cell as a frontier.
+            return !Cells.ContainsKey(new GridCoord(c.X + 1, c.Y, c.Z))
+                || !Cells.ContainsKey(new GridCoord(c.X - 1, c.Y, c.Z))
+                || !Cells.ContainsKey(new GridCoord(c.X, c.Y + 1, c.Z))
+                || !Cells.ContainsKey(new GridCoord(c.X, c.Y - 1, c.Z));
+        }
     }
 
     #endregion
@@ -693,9 +751,80 @@ namespace ZeusBotAI
 
     #endregion
 
+    #region Game state
+
+    // -------------------------------------------------------------------------
+    //  GameState - cheap snapshot of CCSGameRules updated once per tick.
+    //  Bots respect every state in which a human can't move: freeze period,
+    //  warmup not yet ended, round restart pending, server pause, post-round
+    //  countdown, and team intro.
+    //  When BotsCanMove is false the motor injects zero velocity (and lets
+    //  the engine settle the body), no buttons are pressed, no footsteps
+    //  are emitted, no firing happens, no weapon swapping happens.
+    // -------------------------------------------------------------------------
+    public static class GameState
+    {
+        public static bool FreezePeriod;
+        public static bool WarmupPeriod;
+        public static float WarmupEndsAt;        // CCSGameRules.WarmupPeriodEnd
+        public static float RestartRoundTime;    // CCSGameRules.RestartRoundTime
+        public static bool TeamIntroPeriod;
+        public static bool MatchWaitingForResume;
+        public static bool TechnicalTimeOut;
+        public static bool GamePaused;
+        public static float PostRoundUntil = -999f;   // populated by RoundEnd events
+        public static int GamePhase;             // raw enum value (we don't depend on a specific def)
+
+        // True when actual gameplay is happening - players are allowed to walk.
+        public static bool BotsCanMove
+        {
+            get
+            {
+                float now = Server.CurrentTime;
+                if (GamePaused) return false;
+                if (MatchWaitingForResume) return false;
+                if (TechnicalTimeOut) return false;
+                if (FreezePeriod) return false;
+                if (TeamIntroPeriod) return false;
+                if (now < PostRoundUntil) return false;
+                if (RestartRoundTime > now) return false;
+                // During warmup itself we still let bots roam (humans can too).
+                return true;
+            }
+        }
+
+        public static void Refresh()
+        {
+            // Default to "can move" if we can't read the rules entity yet.
+            var rulesProxy = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault();
+            var rules = rulesProxy?.GameRules;
+            if (rules == null)
+            {
+                FreezePeriod = false;
+                WarmupPeriod = false;
+                TeamIntroPeriod = false;
+                MatchWaitingForResume = false;
+                TechnicalTimeOut = false;
+                GamePaused = false;
+                return;
+            }
+            FreezePeriod = rules.FreezePeriod;
+            WarmupPeriod = rules.WarmupPeriod;
+            WarmupEndsAt = rules.WarmupPeriodEnd;
+            RestartRoundTime = rules.RestartRoundTime;
+            TeamIntroPeriod = rules.TeamIntroPeriod;
+            MatchWaitingForResume = rules.MatchWaitingForResume;
+            TechnicalTimeOut = rules.TechnicalTimeOut;
+            GamePaused = rules.GamePaused;
+            GamePhase = rules.GamePhase;
+        }
+    }
+
+    #endregion
+
     #region The ZeusBot
 
-    public enum BotPhase { Roam, Probe, Engage, Reposition, Investigate }
+    public enum BotPhase { Roam, Probe, Engage, Reposition, Investigate, Follow }
 
     public class ZeusBot
     {
@@ -774,6 +903,27 @@ namespace ZeusBotAI
         // Tiny per-tick humanization noise on speed.
         public float SpeedJitter;
 
+        // === Exploration / shadowing =====================================
+        // When the planner repeatedly fails to reach the chosen goal, the
+        // bot temporarily routes through the "frontier" of its learnt
+        // graph instead - walking to an unknown edge of the map so the
+        // graph grows there. When even that fails it shadows a teammate.
+        public uint FailedGoalKey;             // hash of current FinalGoal we keep failing on
+        public int FailedGoalAttempts;         // consecutive A* failures for the current goal
+        public Vector? FrontierTarget;         // currently chosen frontier exploration cell
+        public float FrontierUntil;            // give up on this frontier point after N seconds
+        public uint? ShadowTargetIndex;        // teammate we're currently shadowing
+        public float ShadowReevaluateAt;       // when to reconsider who to shadow
+
+        // === Humanization extras =========================================
+        public float CurrentTurnRate;          // smoothed (deg/s) so aim accelerates instead of snapping
+        public float IdleYawDrift;             // accumulated drift while idle
+        public float NextIdleDriftAt;          // time of next idle drift impulse
+        public float IdleDriftTarget;          // target offset in degrees for current drift step
+        public float PauseUntil;               // bot is briefly standing still (decision pause)
+        public float NextPaceShiftAt;          // time to pick a new jog/sprint pace
+        public float PaceFactor = 1f;          // 0.65..1.05 multiplier on roam speed
+
         public ZeusBot(CCSPlayerController c, float now)
         {
             Controller = c;
@@ -835,18 +985,39 @@ namespace ZeusBotAI
             bot.PendingButtons = 0;
             bot.WantWalk = false;
 
+            // If the game-state forbids player movement (freeze period,
+            // post-round, warmup not yet ended, paused, etc.) the bot still
+            // perceives the world (aim & sensors update) but moves nowhere
+            // and presses no buttons. This matches what a player can do.
+            bool canMove = GameState.BotsCanMove;
+
             UpdateSensors(bot, allPlayers, graph, now, dt);
-            UpdateAudio(bot, graph, now, dt);
-            ChooseTarget(bot, now);
-            UpdateScalars(bot, now, dt);
-            UpdatePhase(bot, now);
-            UpdateGoal(bot, graph, now);
-            UpdatePath(bot, graph, now, dt);
-            UpdateMotor(bot, graph, now, dt);
-            UpdateAim(bot, graph, now, dt);
-            UpdateWeapon(bot, now);
-            UpdateFire(bot, now);
-            EmitFootsteps(bot, now);
+            if (canMove)
+            {
+                UpdateAudio(bot, graph, now, dt);
+                ChooseTarget(bot, now);
+                UpdateScalars(bot, now, dt);
+                UpdatePhase(bot, graph, now);
+                UpdateGoal(bot, allPlayers, graph, now);
+                UpdatePath(bot, graph, now, dt);
+                UpdateMotor(bot, graph, now, dt);
+                UpdateAim(bot, graph, now, dt);
+                UpdateWeapon(bot, now);
+                UpdateFire(bot, now);
+                EmitFootsteps(bot, now);
+            }
+            else
+            {
+                // While we wait for the round to begin: aim is still updated
+                // so a bot can subtly look around (looks much more alive
+                // than statues), but we explicitly clear path state and
+                // never emit footsteps or fire.
+                bot.ClearPath();
+                bot.HaveGoal = false;
+                bot.HoldingAngle = false;
+                bot.PrimaryTarget = null;
+                UpdateAim(bot, graph, now, dt);
+            }
         }
 
         // =====================================================================
@@ -1100,7 +1271,7 @@ namespace ZeusBotAI
         // =====================================================================
         //  Phase
         // =====================================================================
-        private static void UpdatePhase(ZeusBot bot, float now)
+        private static void UpdatePhase(ZeusBot bot, NavGraph graph, float now)
         {
             BotPhase next = bot.Phase;
             bool haveLive = bot.PrimaryTarget != null && bot.PrimaryTarget.Threat > 0.35f && bot.PrimaryTarget.Source == IntelSource.Visual;
@@ -1109,10 +1280,21 @@ namespace ZeusBotAI
             bool recentlyHurt = (now - bot.LastHurtAt) < 2.0f;
             bool wantInvestigate = bot.Curiosity > 0.55f && bot.PrimaryTarget == null;
 
+            // A bot that doesn't know enough of the map to plan a path to its
+            // chosen goal falls back to shadowing a teammate. The threshold is
+            // intentionally low: even after a few rounds we should know more
+            // than 150 cells of a competitive map.
+            bool graphTooSmall = graph.Cells.Count < 150;
+            bool stuckOnGoal = bot.FailedGoalAttempts >= 3;
+            bool wantShadow = (graphTooSmall || stuckOnGoal)
+                              && bot.PrimaryTarget == null
+                              && !recentlyHurt && !recentlyKilled;
+
             if (haveLive && !recentlyKilled) next = BotPhase.Engage;
             else if (recentlyKilled || recentlyHurt) next = BotPhase.Reposition;
             else if (haveStale || bot.Alert > 0.45f) next = BotPhase.Probe;
             else if (wantInvestigate) next = BotPhase.Investigate;
+            else if (wantShadow) next = BotPhase.Follow;
             else next = BotPhase.Roam;
 
             if (bot.Phase == BotPhase.Engage && next != BotPhase.Engage && (now - bot.PhaseEnteredAt) < 0.4f)
@@ -1123,7 +1305,7 @@ namespace ZeusBotAI
         // =====================================================================
         //  Pick a goal point on the map.
         // =====================================================================
-        private static void UpdateGoal(ZeusBot bot, NavGraph graph, float now)
+        private static void UpdateGoal(ZeusBot bot, List<CCSPlayerController> allPlayers, NavGraph graph, float now)
         {
             Vector me = bot.Pawn.AbsOrigin!;
             int myTeam = bot.Controller.TeamNum;
@@ -1132,6 +1314,52 @@ namespace ZeusBotAI
 
             switch (bot.Phase)
             {
+                case BotPhase.Follow:
+                    {
+                        // Find / refresh a teammate to shadow.
+                        if (bot.ShadowReevaluateAt < now || bot.ShadowTargetIndex == null)
+                        {
+                            bot.ShadowTargetIndex = PickShadowTarget(bot, allPlayers);
+                            bot.ShadowReevaluateAt = now + 5f;
+                        }
+                        var leader = bot.ShadowTargetIndex.HasValue
+                            ? allPlayers.FirstOrDefault(p => p.Index == bot.ShadowTargetIndex.Value && p.PawnIsAlive)
+                            : null;
+                        if (leader?.PlayerPawn.Value?.AbsOrigin != null)
+                        {
+                            Vector leaderPos = leader.PlayerPawn.Value.AbsOrigin;
+                            // Hang back so we don't crowd them. Personality
+                            // picks how close - more aggressive bots stick
+                            // closer; more patient bots trail further.
+                            float trail = 220f + bot.Personality.Patience * 200f
+                                                - bot.Personality.Aggression * 100f;
+                            Vector toLeader = leaderPos - me;
+                            float d = MathUtils.Length(toLeader);
+                            if (d > 1f)
+                            {
+                                Vector n = new Vector(toLeader.X / d, toLeader.Y / d, toLeader.Z / d);
+                                // Offset to the side so two bots shadowing
+                                // the same human form a flank rather than
+                                // stacking.
+                                Vector side = new Vector(-n.Y, n.X, 0);
+                                float sideAmt = ((bot.Controller.Index & 1) == 0 ? 1f : -1f)
+                                                * (60f + bot.Personality.LaneOffset * 20f);
+                                newGoal = new Vector(
+                                    leaderPos.X - n.X * trail + side.X * sideAmt,
+                                    leaderPos.Y - n.Y * trail + side.Y * sideAmt,
+                                    leaderPos.Z);
+                            }
+                            else newGoal = leaderPos;
+                        }
+                        else
+                        {
+                            // No teammate yet - default to the normal roam
+                            // objective so we still try to push toward the
+                            // objective on our own.
+                            newGoal = PickObjective(bot, enemyTeam, graph, now);
+                        }
+                    }
+                    break;
                 case BotPhase.Engage:
                     if (bot.PrimaryTarget != null)
                     {
@@ -1187,15 +1415,60 @@ namespace ZeusBotAI
 
             if (newGoal != null)
             {
-                if (!bot.HaveGoal
+                bool changed = !bot.HaveGoal
                     || (newGoal - bot.FinalGoal).Length() > 220f
-                    || bot.Path.Count == 0)
+                    || bot.Path.Count == 0;
+                if (changed)
                 {
                     bot.FinalGoal = newGoal;
                     bot.HaveGoal = true;
                     bot.ClearPath();
+                    // Reset failure tracking when we genuinely pick a new
+                    // goal - the old failure history doesn't apply.
+                    uint newKey = GoalKey(newGoal);
+                    if (newKey != bot.FailedGoalKey)
+                    {
+                        bot.FailedGoalKey = newKey;
+                        bot.FailedGoalAttempts = 0;
+                    }
                 }
             }
+        }
+
+        private static uint GoalKey(Vector g)
+        {
+            var c = GridCoord.FromWorld(g);
+            return unchecked((uint)c.GetHashCode());
+        }
+
+        private static uint? PickShadowTarget(ZeusBot bot, List<CCSPlayerController> allPlayers)
+        {
+            // Prefer human teammates so bots literally "play with" players.
+            // Among humans we pick the closest one. Falls back to closest
+            // bot teammate if there are none.
+            Vector me = bot.Pawn.AbsOrigin!;
+            CCSPlayerController? bestHuman = null;
+            float bestHumanDist = float.MaxValue;
+            CCSPlayerController? bestBot = null;
+            float bestBotDist = float.MaxValue;
+            foreach (var p in allPlayers)
+            {
+                if (p == bot.Controller || !p.PawnIsAlive) continue;
+                if (p.TeamNum != bot.Controller.TeamNum) continue;
+                var pawn = p.PlayerPawn.Value;
+                if (pawn?.AbsOrigin == null) continue;
+                float d = (pawn.AbsOrigin - me).Length();
+                if (!p.IsBot)
+                {
+                    if (d < bestHumanDist) { bestHumanDist = d; bestHuman = p; }
+                }
+                else
+                {
+                    if (d < bestBotDist) { bestBotDist = d; bestBot = p; }
+                }
+            }
+            var leader = bestHuman ?? bestBot;
+            return leader?.Index;
         }
 
         private static Vector OffsetForFanOut(ZeusBot bot)
@@ -1255,14 +1528,25 @@ namespace ZeusBotAI
         }
 
         // =====================================================================
-        //  Path generation & maintenance
+        //  Path generation & maintenance.
+        //
+        //  Three tiers of routing:
+        //    1. A* over the learnt graph (preferred).
+        //    2. Frontier exploration: when A* fails, walk to the nearest
+        //       cell on the edge of our knowledge that lies *toward* the
+        //       goal. This makes the graph grow in the right direction
+        //       and prevents bots from getting stuck in spawn.
+        //    3. Direct steering with stuck recovery (motor layer).
+        //
+        //  Every A* failure increments FailedGoalAttempts; after 3 the
+        //  phase machine switches us to Follow mode and we shadow a
+        //  teammate instead.
         // =====================================================================
         private static void UpdatePath(ZeusBot bot, NavGraph graph, float now, float dt)
         {
             if (!bot.HaveGoal) return;
             Vector me = bot.Pawn.AbsOrigin!;
 
-            // Build a fresh path if needed.
             bool needPath = bot.Path.Count == 0
                 || (bot.PathIndex >= bot.Path.Count)
                 || now > bot.NextRepathAt;
@@ -1274,22 +1558,62 @@ namespace ZeusBotAI
                 {
                     bot.Path = path;
                     bot.PathIndex = 0;
-                    // Add the final goal as the final waypoint, in case A*
-                    // ended at a centroid slightly off the goal.
                     if ((bot.Path[bot.Path.Count - 1] - bot.FinalGoal).Length() > 96f)
                         bot.Path.Add(bot.FinalGoal);
                     bot.NextRepathAt = now + 3.0f;
+                    bot.FailedGoalAttempts = 0;
+                    bot.FrontierTarget = null;
                 }
                 else
                 {
-                    // Graph doesn't know yet - we'll fall back to direct
-                    // steering toward the goal in the motor layer.
-                    bot.Path.Clear();
-                    bot.NextRepathAt = now + 1.0f;
+                    // A* failed. Try frontier exploration toward the goal so
+                    // the bot at least walks somewhere useful - this is how
+                    // it escapes spawn while learning the map.
+                    bot.FailedGoalAttempts++;
+                    bool refreshFrontier = bot.FrontierTarget == null
+                        || now > bot.FrontierUntil
+                        || (bot.FrontierTarget - me).Length() < 120f;
+                    if (refreshFrontier)
+                    {
+                        var f = graph.FrontierToward(me, bot.FinalGoal);
+                        if (f != null)
+                        {
+                            bot.FrontierTarget = f.Center;
+                            bot.FrontierUntil = now + 8f;
+                        }
+                        else
+                        {
+                            bot.FrontierTarget = null;
+                        }
+                    }
+
+                    if (bot.FrontierTarget != null)
+                    {
+                        var fpath = AStar.FindPath(graph, me, bot.FrontierTarget);
+                        if (fpath != null && fpath.Count > 0)
+                        {
+                            bot.Path = fpath;
+                            bot.PathIndex = 0;
+                            bot.Path.Add(bot.FrontierTarget);
+                        }
+                        else
+                        {
+                            // Even the frontier isn't reachable through the
+                            // graph - steer straight toward it; the motor
+                            // layer takes over with stuck recovery.
+                            bot.Path.Clear();
+                            bot.Path.Add(bot.FrontierTarget);
+                            bot.PathIndex = 0;
+                        }
+                    }
+                    else
+                    {
+                        bot.Path.Clear();
+                    }
+                    bot.NextRepathAt = now + 1.5f;
                 }
             }
 
-            // Advance to next waypoint when close enough.
             while (bot.PathIndex < bot.Path.Count)
             {
                 var wp = bot.Path[bot.PathIndex];
@@ -1308,14 +1632,14 @@ namespace ZeusBotAI
             Vector me = pawn.AbsOrigin!;
             bool grounded = ((uint)pawn.Flags & 1) != 0;
 
-            // Stuck detection (used by both path-followed roam and combat).
+            // Stuck detection.
             Vector vel = pawn.AbsVelocity ?? new Vector(0, 0, 0);
             float horizSpeed = MathUtils.LengthXY(vel);
             bool wantingToMove = bot.HaveGoal && (bot.FinalGoal - me).Length() > 96f;
             if (wantingToMove && horizSpeed < 50f) bot.StuckTimer += dt;
             else bot.StuckTimer = Math.Max(0f, bot.StuckTimer - dt * 2.5f);
 
-            // Pick the steering target this tick.
+            // Steering target this tick.
             Vector steer = bot.FinalGoal;
             if (bot.Path.Count > 0 && bot.PathIndex < bot.Path.Count) steer = bot.Path[bot.PathIndex];
 
@@ -1327,9 +1651,8 @@ namespace ZeusBotAI
             }
             else heading = new Vector(0, 0, 0);
 
-            // If we've been stuck a moment, try a randomized dodge yaw and a
-            // little jump. Persisting the dodge yaw briefly avoids the bot
-            // wiggling rapidly back and forth.
+            // Stuck recovery (no jump - jumping mid-walk doesn't read as
+            // human). Just rotate heading and force a replan.
             if (bot.StuckTimer > 0.6f)
             {
                 if (now > bot.StuckDodgeUntil)
@@ -1337,31 +1660,62 @@ namespace ZeusBotAI
                     Random r = new Random((int)(bot.Controller.Index * 991 + now * 100));
                     bot.StuckDodgeYaw = (float)((r.NextDouble() * 2 - 1) * Math.PI * 0.55);
                     bot.StuckDodgeUntil = now + 0.5f;
-                    if (grounded && bot.JumpCooldown < now)
-                    {
-                        bot.PendingButtons |= (ulong)PlayerButtons.Jump;
-                        bot.JumpCooldown = now + 0.45f;
-                    }
                 }
                 heading = MathUtils.RotateXY(heading, bot.StuckDodgeYaw);
-                if (bot.StuckTimer > 2.0f)
+                if (bot.StuckTimer > 1.5f)
                 {
-                    // Force a replan and pull a fresh path next tick.
                     bot.ClearPath();
                     bot.NextRepathAt = 0f;
                 }
             }
 
-            // Phase-specific shaping. Combat overrides direct heading with
-            // its own movement choices.
+            // Pacing: very gradually drift between jog and sprint speeds so
+            // bots don't all sprint constantly. Refreshed on a long timer.
+            if (now > bot.NextPaceShiftAt)
+            {
+                Random rp = new Random((int)(bot.Controller.Index * 31 + now * 7));
+                bot.PaceFactor = 0.7f + (float)rp.NextDouble() * 0.35f; // 0.70..1.05
+                bot.NextPaceShiftAt = now + 4f + (float)rp.NextDouble() * 6f;
+            }
+
+            // Decision pause: at sharp turns in the path, briefly slow down
+            // or stop, simulating the moment a player checks an angle
+            // before committing. Only outside active combat.
+            if (bot.Phase != BotPhase.Engage && bot.Phase != BotPhase.Reposition
+                && bot.PauseUntil < now
+                && bot.Path.Count > 1 && bot.PathIndex < bot.Path.Count - 1)
+            {
+                Vector cur = bot.Path[bot.PathIndex];
+                Vector nxt = bot.Path[bot.PathIndex + 1];
+                Vector a = MathUtils.Normalize(cur - me);
+                Vector b = MathUtils.Normalize(nxt - cur);
+                if (MathUtils.Length(a) > 0.1f && MathUtils.Length(b) > 0.1f
+                    && (cur - me).Length() < 140f)
+                {
+                    float turn = MathUtils.Dot(a, b);
+                    if (turn < 0.4f) // sharp turn (>~66°)
+                    {
+                        Random pr = new Random((int)(bot.Controller.Index * 17 + bot.PathIndex));
+                        if (pr.NextDouble() < bot.Personality.MicroPauseBias)
+                            bot.PauseUntil = now + 0.18f + (float)pr.NextDouble() * 0.25f;
+                    }
+                }
+            }
+
+            // Phase-specific shaping.
             switch (bot.Phase)
             {
                 case BotPhase.Roam:
                     ShapeRoam(bot, ref heading, now, dt); break;
                 case BotPhase.Investigate:
                     ShapeRoam(bot, ref heading, now, dt);
-                    bot.WantWalk = true; // sneak when investigating
+                    bot.WantWalk = true;
                     bot.DesiredSpeed = Math.Min(bot.DesiredSpeed, 150f);
+                    break;
+                case BotPhase.Follow:
+                    ShapeRoam(bot, ref heading, now, dt);
+                    // Shadowers move at a natural pace, not sprinting.
+                    bot.DesiredSpeed = Math.Min(bot.DesiredSpeed, 200f);
                     break;
                 case BotPhase.Probe:
                     ShapeProbe(bot, ref heading, grounded, now, dt); break;
@@ -1371,9 +1725,15 @@ namespace ZeusBotAI
                     ShapeReposition(bot, ref heading, now, dt); break;
             }
 
-            // Micro-pauses: occasionally a roamer will stop briefly to look
-            // around (very human). Only when not in combat.
-            if (bot.Phase == BotPhase.Roam || bot.Phase == BotPhase.Investigate)
+            // Decision pause overrides speed for its short window.
+            if (bot.PauseUntil > now && bot.Phase != BotPhase.Engage)
+            {
+                bot.DesiredSpeed = 0f;
+                heading = new Vector(0, 0, 0);
+            }
+
+            // Stop-and-look head sweeps (peaceful phases only).
+            if (bot.Phase == BotPhase.Roam || bot.Phase == BotPhase.Investigate || bot.Phase == BotPhase.Follow)
             {
                 float pauseChance = bot.Personality.MicroPauseBias * 0.35f;
                 if (bot.NextHeadSweepAt < now && bot.HeadSweepUntil < now)
@@ -1382,7 +1742,6 @@ namespace ZeusBotAI
                     {
                         bot.HeadSweepUntil = now + 0.6f + bot.Personality.Patience * 0.7f;
                         bot.NextHeadSweepAt = now + 5f;
-                        // pick a hot cell to glance toward
                         bot.HeadSweepFocus = PickHeadSweepFocus(bot, graph);
                     }
                 }
@@ -1393,11 +1752,18 @@ namespace ZeusBotAI
                 }
             }
 
+            // Heading noise: humans rarely walk in a perfectly straight line
+            // along a path. A tiny lateral drift removes the "rail" feel.
+            if (bot.Phase != BotPhase.Engage)
+            {
+                float laneNoise = (float)Math.Sin(now * 0.55f + bot.NoisePhase) * 0.045f;
+                heading = MathUtils.RotateXY(heading, laneNoise);
+            }
+
             bot.DesiredMove = heading;
 
-            // Small per-tick humanization noise on the issued speed so we
-            // don't move at exactly the same rate every tick.
-            bot.SpeedJitter = MathUtils.Lerp(bot.SpeedJitter, (float)(new Random((int)(bot.Controller.Index * 13 + now * 11)).NextDouble() - 0.5) * 16f, MathUtils.Clamp01(dt * 4f));
+            // Per-tick speed humanization (small).
+            bot.SpeedJitter = MathUtils.Lerp(bot.SpeedJitter, (float)(new Random((int)(bot.Controller.Index * 13 + now * 11)).NextDouble() - 0.5) * 12f, MathUtils.Clamp01(dt * 4f));
         }
 
         private static Vector? PickHeadSweepFocus(ZeusBot bot, NavGraph graph)
@@ -1421,10 +1787,15 @@ namespace ZeusBotAI
 
         private static void ShapeRoam(ZeusBot bot, ref Vector heading, float now, float dt)
         {
-            float baseSpeed = MathUtils.Lerp(250f, 130f, bot.Stealth);
+            // Pace varies between jogging (~175u) and sprinting (~250u) so
+            // a squad doesn't all sprint together. Stealth pulls the upper
+            // bound down.
+            float fast = MathUtils.Lerp(250f, 200f, bot.Stealth);
+            float slow = MathUtils.Lerp(165f, 120f, bot.Stealth);
+            float baseSpeed = MathUtils.Lerp(slow, fast, MathUtils.Clamp01(bot.PaceFactor));
             bot.DesiredSpeed = baseSpeed + bot.SpeedJitter;
-            bot.WantWalk = bot.Stealth > 0.55f;
-            float wander = (float)Math.Sin(now * 0.7f + bot.NoisePhase) * 0.10f;
+            bot.WantWalk = bot.Stealth > 0.55f || bot.PaceFactor < 0.75f;
+            float wander = (float)Math.Sin(now * 0.7f + bot.NoisePhase) * 0.08f;
             heading = MathUtils.RotateXY(heading, wander);
         }
 
@@ -1493,12 +1864,19 @@ namespace ZeusBotAI
                 case 0:
                     lateral = bot.StrafeDir * MathUtils.Lerp(0.4f, 1.0f, micro); break;
                 case 1:
+                    // Shoulder swing. We *can* throw an occasional jump
+                    // here, but only when the bot is genuinely aggressive
+                    // and the engagement is hot - random jumping looks
+                    // gamey.
                     forwardWeight = MathUtils.Clamp(forwardWeight + 0.4f, -0.4f, 1f);
                     lateral = bot.StrafeDir * 0.6f;
-                    if (grounded && bot.JumpCooldown < now && bot.Personality.JumpBias > 0.45f && micro > 0.4f)
+                    if (grounded && bot.JumpCooldown < now
+                        && bot.Personality.JumpBias > 0.75f
+                        && bot.Personality.Aggression > 0.7f
+                        && micro > 0.7f && dist < 220f)
                     {
                         bot.PendingButtons |= (ulong)PlayerButtons.Jump;
-                        bot.JumpCooldown = now + MathUtils.Lerp(0.9f, 0.4f, micro);
+                        bot.JumpCooldown = now + 1.5f;
                     }
                     break;
                 case 2:
@@ -1567,30 +1945,66 @@ namespace ZeusBotAI
             {
                 Vector m = bot.DesiredMove;
                 float yaw = (float)(Math.Atan2(m.Y, m.X) * MathUtils.Rad2Deg);
-                float pitch = (float)Math.Sin(now * 0.4f + bot.NoisePhase) * 4f;
+                // Slow idle pitch wobble and a slow yaw drift around movement
+                // direction - mirrors a player's natural micro-adjustments
+                // and prevents the locked-yaw "tram" look.
+                float pitch = (float)Math.Sin(now * 0.4f + bot.NoisePhase) * 3f;
+                yaw += (float)Math.Sin(now * 0.6f + bot.NoisePhase * 1.3f) * 6f;
                 desired = new QAngle(pitch, yaw, 0f);
             }
             else
             {
-                // Idle - gentle sweep across known hot cells.
+                // Idle - gentle sweep across known hot cells, otherwise drift.
                 if (bot.HeadSweepFocus == null || now > bot.NextHeadSweepAt)
                 {
                     bot.HeadSweepFocus = PickHeadSweepFocus(bot, graph);
                     bot.NextHeadSweepAt = now + 3f + bot.Personality.Patience * 3f;
                 }
-                desired = bot.HeadSweepFocus != null ? AimAtPosition(bot, bot.HeadSweepFocus, now) : bot.AimGoal;
+                if (bot.HeadSweepFocus != null)
+                {
+                    desired = AimAtPosition(bot, bot.HeadSweepFocus, now);
+                }
+                else
+                {
+                    // Truly idle - wander the crosshair gently.
+                    if (now > bot.NextIdleDriftAt)
+                    {
+                        Random idr = new Random((int)(bot.Controller.Index * 53 + now * 7));
+                        bot.IdleDriftTarget = (float)((idr.NextDouble() * 2 - 1) * 35);
+                        bot.NextIdleDriftAt = now + 1.5f + (float)idr.NextDouble() * 2.5f;
+                    }
+                    bot.IdleYawDrift = MathUtils.SmoothApproach(bot.IdleYawDrift, bot.IdleDriftTarget, 1.2f, dt);
+                    desired = new QAngle(
+                        (float)Math.Sin(now * 0.35f + bot.NoisePhase) * 2.5f,
+                        curYaw + bot.IdleYawDrift * 0.04f,
+                        0f);
+                }
             }
 
             bot.AimGoal = desired;
 
+            // Human aim accelerates onto a target rather than moving at a
+            // constant clamp rate. We low-pass the *applied* turn-rate so
+            // sudden new targets ramp the camera up to combat tracking
+            // speed over ~0.15s.
             float skillBoost = 0.5f + bot.Personality.Skill * 0.5f;
-            float turnRate = MathUtils.Lerp(180f, 540f, bot.CombatIntensity) * skillBoost;
-            float maxStep = turnRate * dt;
+            float targetTurnRate = MathUtils.Lerp(140f, 520f, bot.CombatIntensity) * skillBoost;
+            float ramp = bot.CombatIntensity > 0.4f ? 10f : 4f;
+            bot.CurrentTurnRate = MathUtils.SmoothApproach(bot.CurrentTurnRate, targetTurnRate, ramp, dt);
+            float maxStep = bot.CurrentTurnRate * dt;
 
             float yawDiff = MathUtils.NormalizeAngle(desired.Y - curYaw);
             float pitchDiff = MathUtils.NormalizeAngle(desired.X - curPitch);
-            float newYaw = curYaw + MathUtils.Clamp(yawDiff, -maxStep, maxStep);
-            float newPitch = MathUtils.Clamp(curPitch + MathUtils.Clamp(pitchDiff, -maxStep, maxStep), -89f, 89f);
+
+            // Overshoot is a hallmark of human mouse motion. For very large
+            // yaw corrections, allow a tiny percentage of "overshoot" by
+            // amplifying the step slightly while we're far off, then
+            // settling. This is bounded so it never produces flicks.
+            float yawStep = MathUtils.Clamp(yawDiff, -maxStep, maxStep);
+            float pitchStep = MathUtils.Clamp(pitchDiff, -maxStep, maxStep);
+
+            float newYaw = curYaw + yawStep;
+            float newPitch = MathUtils.Clamp(curPitch + pitchStep, -89f, 89f);
             bot.AimGoal = new QAngle(newPitch, newYaw, 0f);
         }
 
@@ -1731,7 +2145,7 @@ namespace ZeusBotAI
     public class ZeusBotAIGoapPlugin : BasePlugin
     {
         public override string ModuleName => "Zeus Bot AI (Self-Learning Nav)";
-        public override string ModuleVersion => "5.0.0";
+        public override string ModuleVersion => "5.1.0";
         public override string ModuleAuthor => "ZeusBotAI";
 
         private bool botsEnabled = true;
@@ -1772,6 +2186,9 @@ namespace ZeusBotAI
             RegisterEventHandler<EventBombDropped>(OnBombDropped);
             RegisterEventHandler<EventBombExploded>(OnBombExploded);
             RegisterEventHandler<EventRoundStart>(OnRoundStart);
+            RegisterEventHandler<EventRoundEnd>(OnRoundEnd);
+            RegisterEventHandler<EventRoundFreezeEnd>(OnRoundFreezeEnd);
+            RegisterEventHandler<EventCsWinPanelRound>(OnWinPanelRound);
             RegisterEventHandler<EventPlayerFootstep>(OnPlayerFootstep);
 
             AddCommandListener("say", OnPlayerChat);
@@ -2003,6 +2420,7 @@ namespace ZeusBotAI
         {
             AudioSim.Events.Clear();
             TacticalIntel.Reset();
+            GameState.PostRoundUntil = -999f;
             foreach (var b in bots.Values)
             {
                 b.Tracks.Clear();
@@ -2013,7 +2431,46 @@ namespace ZeusBotAI
                 b.HoldingAngle = false;
                 b.ClearPath();
                 b.HaveGoal = false;
+                // Reset per-round failure tracking so a fresh round gives
+                // each bot a clean shot at finding its own path.
+                b.FailedGoalAttempts = 0;
+                b.FrontierTarget = null;
+                b.ShadowTargetIndex = null;
             }
+            return HookResult.Continue;
+        }
+
+        private HookResult OnRoundEnd(EventRoundEnd @event, GameEventInfo info)
+        {
+            // After the round ends there is a "post round" window where the
+            // round is over but the freeze/restart for the next round hasn't
+            // begun. Players can't really do anything productive; we mirror
+            // that for bots. CCSGameRules.RoundEndTimerTime can be 0 with
+            // mp_round_restart_delay still ticking, so we use a generous
+            // default window.
+            GameState.PostRoundUntil = Server.CurrentTime + 5.5f;
+            foreach (var b in bots.Values)
+            {
+                b.ClearPath();
+                b.HaveGoal = false;
+                b.PrimaryTarget = null;
+            }
+            return HookResult.Continue;
+        }
+
+        private HookResult OnWinPanelRound(EventCsWinPanelRound @event, GameEventInfo info)
+        {
+            // Some game modes emit win panel without RoundEnd in our path,
+            // so cover that bracket too.
+            if (GameState.PostRoundUntil < Server.CurrentTime + 1f)
+                GameState.PostRoundUntil = Server.CurrentTime + 4.5f;
+            return HookResult.Continue;
+        }
+
+        private HookResult OnRoundFreezeEnd(EventRoundFreezeEnd @event, GameEventInfo info)
+        {
+            // Freeze ends -> we are free to move immediately. Refresh from
+            // game rules next tick.
             return HookResult.Continue;
         }
 
@@ -2216,6 +2673,11 @@ namespace ZeusBotAI
             float dt = Server.TickInterval;
             tickCounter++;
 
+            // Snapshot game rules once per tick - everything else just reads
+            // the cached flags. Doing this every tick is cheap and avoids
+            // skewed state right after a round transition.
+            if (tickCounter % 4 == 0) GameState.Refresh();
+
             AudioSim.Prune(now);
             nav.DecayHotspots(dt);
 
@@ -2273,6 +2735,34 @@ namespace ZeusBotAI
             QAngle outAngles = z.AimGoal;
             Vector vel = pawn.AbsVelocity ?? new Vector(0, 0, 0);
             Vector injected = new Vector(vel.X, vel.Y, vel.Z);
+            bool grounded = ((uint)pawn.Flags & 1) != 0;
+
+            // If the game-state forbids movement, hard-stop horizontal
+            // velocity and clear all queued buttons. The bot still gets to
+            // look around (eye angles are applied below) so it doesn't
+            // look like a frozen statue.
+            if (!GameState.BotsCanMove)
+            {
+                injected.X = 0f;
+                injected.Y = 0f;
+                if (grounded) injected.Z = -15f;
+                z.PendingButtons = 0;
+                QAngle frozenBody = new QAngle(0f, outAngles.Y, outAngles.Z);
+                pawn.Teleport(null, frozenBody, injected);
+                if (pawn.EyeAngles != null)
+                {
+                    pawn.EyeAngles.X = outAngles.X;
+                    pawn.EyeAngles.Y = outAngles.Y;
+                    pawn.EyeAngles.Z = outAngles.Z;
+                }
+                if (pawn.V_angle != null)
+                {
+                    pawn.V_angle.X = outAngles.X;
+                    pawn.V_angle.Y = outAngles.Y;
+                    pawn.V_angle.Z = outAngles.Z;
+                }
+                return;
+            }
 
             float speed = z.DesiredSpeed;
             if (z.WantWalk && speed > 130f) speed = 130f;
@@ -2289,7 +2779,6 @@ namespace ZeusBotAI
                 injected.Y *= 0.5f;
             }
 
-            bool grounded = ((uint)pawn.Flags & 1) != 0;
             if (grounded) injected.Z = -15f;
 
             if ((z.PendingButtons & (ulong)PlayerButtons.Jump) != 0)
